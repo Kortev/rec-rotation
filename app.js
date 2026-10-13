@@ -740,6 +740,29 @@ function sheetCardio(){
   return h;
 }
 
+// ---------- check-in prompt: a baseline on first open, then every 4 weeks ----------
+function checkinDue(){ const last = DB.checkins[0]; return !last || Date.now() - last.at > 27*864e5; }
+function snoozeCheckin(){ const d = new Date(); d.setDate(d.getDate()+1); d.setHours(5,0,0,0); UI.ciSnooze = d.getTime(); saveUI(); }
+function maybePromptCheckin(){
+  if(showInstall() || draft || S.sheet || S.finish || !checkinDue()) return;
+  if(UI.ciSnooze && Date.now() < UI.ciSnooze) return;
+  openSheet("checkin", {baseline: !DB.checkins.length});
+}
+function sheetCheckin(){
+  const sh = S.sheet, last = DB.checkins[0] || {};
+  let h = '<div class="headrow"><h2>'+(sh.baseline ? "Your starting point" : "Monthly check-in")+'</h2><button class="link" style="text-decoration:none" data-act="close">Later</button></div>';
+  h += '<p class="muted">'+(sh.baseline
+    ? "Measure once now so in a month you can see what changed. Slow change is hard to spot in the mirror, but a tape measure catches it."
+    : "It's been 4 weeks since your last one. Same tape, same spots. Last time's numbers are shown faintly in each box.")+'</p>';
+  h += $("#checkin-help").innerHTML;
+  const f = (k, label, unit) => '<label for="cs-'+k+'">'+label+'<span class="field"><input id="cs-'+k+'" class="inp" inputmode="decimal" placeholder="'+(last[k]!=null ? esc(last[k]) : "")+'"><i>'+unit+'</i></span></label>';
+  h += '<form id="cs-form" style="display:grid;gap:12px"><div class="ci">'+f("weight","Bodyweight","lb")+f("waist","Waist at navel","in")+f("neck","Neck","in")+f("shoulders","Shoulders","in")+f("arm","Upper arm, flexed","in")+'</div>'+
+    '<p class="small muted">No tape measure? Just enter your weight now and add the rest next time. Every box is optional.</p>'+
+    '<button class="btn" type="submit">Save check-in</button></form>';
+  h += '<p class="small muted">Not a good time? Tap Later and it comes back tomorrow morning, the best time to measure.</p>';
+  return h;
+}
+
 // ---------- reminders (web push) ----------
 const VAPID_PUBLIC = "BFPUvKQVWbxez_lPrl4iI93uml_Ig89SnC-KKq98cQqmgJ8wz2nVDPrkqg-Yijo4zmAWapQNbFcDpd_yl02uEog";
 function b64ToU8(s){ const p = "=".repeat((4 - s.length % 4) % 4); const b = atob((s + p).replace(/-/g,"+").replace(/_/g,"/")); return Uint8Array.from(b, c=>c.charCodeAt(0)); }
@@ -871,6 +894,7 @@ function viewProgress(){
 function openSheet(kind, data){ S.sheet = Object.assign({kind}, data||{}); document.body.classList.add("locked"); renderSheet(); }
 function closeSheet(){
   if(S.sheet && S.sheet.kind==="scan") parkCamera();
+  if(S.sheet && S.sheet.kind==="checkin" && !S.sheet.saved) snoozeCheckin();
   S.sheet = null; S.edit = null; S.confirm = null;
   document.body.classList.remove("locked");
   $("#sheet-root").innerHTML = "";
@@ -880,7 +904,7 @@ function renderSheet(){
   if(!sh){ root.innerHTML = ""; return; }
   const fn = {overview:sheetOverview, end:sheetEnd, howto:sheetHowto, swap:sheetSwap, pick:sheetPick, guide:sheetGuide,
     addfood:sheetAddFood, plate:sheetPlate, editfood:sheetEditFood, todaylog:sheetTodayLog, edge:sheetEdge,
-    lookup:sheetLookup, portion:sheetPortion, cardio:sheetCardio,
+    lookup:sheetLookup, portion:sheetPortion, cardio:sheetCardio, checkin:sheetCheckin,
     edit:sheetEdit, exhist:()=>sheetExHist(sh.variant), scan:sheetScan, food:sheetFood}[sh.kind];
   const full = ["scan","guide","edge","lookup"].includes(sh.kind);
   root.innerHTML = '<div class="sheet" data-scrim="1"><div class="sheet-in'+(full?" full":"")+'" role="dialog" aria-modal="true">'+fn()+'</div></div>';
@@ -1441,7 +1465,7 @@ function commitTyping(){
 // Events (one delegated handler for the page and the sheets)
 // =====================================================================
 document.addEventListener("visibilitychange",()=>{
-  if(document.visibilityState==="visible"){ if(draft){ requestWake(); tick(); } renderSafe(); }
+  if(document.visibilityState==="visible"){ if(draft){ requestWake(); tick(); } renderSafe(); maybePromptCheckin(); }
   else stopCamera();
 });
 $("#pill").addEventListener("click", ()=>{ UI.tab = "train"; saveUI(); render(); window.scrollTo(0,0); });
@@ -1604,6 +1628,19 @@ document.addEventListener("keydown", e=>{ if(e.target.id==="typing" && e.key==="
 document.addEventListener("submit", e=>{
   e.preventDefault();
   const f = e.target;
+  if(f.id==="cs-form"){
+    const g = k => { const v = num($("#cs-"+k).value); return v && v>0 ? v : null; };
+    const at = Date.now();
+    const doc = {id:"c-"+at, at, weight:g("weight"), waist:g("waist"), neck:g("neck"), shoulders:g("shoulders"), arm:g("arm")};
+    if(["weight","waist","neck","shoulders","arm"].every(k=>doc[k]==null)){ toast("Enter at least one measurement, or tap Later."); return; }
+    const baseline = S.sheet.baseline;
+    DB.checkins.push(doc);
+    if(!DB.settings.bodyweight && doc.weight) DB.settings.bodyweight = doc.weight;   // also sets the protein goal
+    S.sheet.saved = true; UI.ciSnooze = 0; saveUI();
+    persist(); checkBadges(); closeSheet(); render();
+    toast(baseline ? "Starting point saved. Next check-in in 4 weeks." : "Check-in saved. Next one in 4 weeks.");
+    return;
+  }
   if(f.id==="ci-form"){
     const g = k => { const v = num($("#ci-"+k).value); return v && v>0 ? v : null; };
     const at = Date.now();
@@ -1730,5 +1767,6 @@ function importBackup(text){
 if(draft){ normalizeDraft(); startTicker(); }
 checkBadges();
 render();
+maybePromptCheckin();
 if("serviceWorker" in navigator){ window.addEventListener("load", ()=>{ navigator.serviceWorker.register("sw.js").catch(()=>{}); }); }
 })();
