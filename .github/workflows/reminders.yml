@@ -1,0 +1,49 @@
+# Sends a workout reminder to the phone at about 2:40 pm Auburn time (Central) on workout days.
+# GitHub's schedule runs in UTC, so there's one run for daylight time and one for standard time;
+# the script only sends from the run that lands in the 2:30–3:29 pm window.
+# GitHub turns off schedules in public repos after 60 days without activity, so a monthly
+# empty commit keeps it running.
+name: Workout reminders
+
+on:
+  schedule:
+    - cron: "40 19 * * 1,2,4,5"   # 2:40 pm CDT, Mon Tue Thu Fri
+    - cron: "40 20 * * 1,2,4,5"   # 2:40 pm CST, Mon Tue Thu Fri
+    - cron: "17 12 1 * *"          # monthly keepalive
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Send now, even outside the reminder window"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  remind:
+    if: github.event.schedule != '17 12 1 * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-save --no-audit --no-fund web-push@3.6.7
+      - run: node .github/scripts/remind.mjs
+        env:
+          VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
+          VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
+          PUSH_SUBSCRIPTION: ${{ secrets.PUSH_SUBSCRIPTION }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+
+  keepalive:
+    if: github.event.schedule == '17 12 1 * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "Keep the reminder schedule active"
+          git push

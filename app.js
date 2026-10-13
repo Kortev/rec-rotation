@@ -100,16 +100,17 @@ const FOODS = [
 // Storage: everything lives on this phone, in localStorage
 // =====================================================================
 const KEY = "rr.v1", DKEY = "rr.draft", UIKEY = "rr.ui";
-function blank(){ return {v:1, sessions:[], checkins:[], protein:{}, foods:[], myFoods:[], usage:{}, settings:{bodyweight:null, sound:true}, lastBackup:null}; }
+function blank(){ return {v:1, sessions:[], checkins:[], protein:{}, foods:[], myFoods:[], usage:{}, water:{}, cardio:[], badges:{}, bestStreak:0,
+  settings:{bodyweight:null, sound:true, waterGoal:null, pushSub:null}, lastBackup:null}; }
 function lsGet(k){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; }catch(e){ return null; } }
 function lsSet(k,v){ try{ if(v==null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); return true; }catch(e){ return false; } }
 let DB = (function(){
   const d = lsGet(KEY), b = blank();
   if(!d || d.v!==1) return b;
   const out = Object.assign(b, d, {settings:Object.assign(b.settings, d.settings||{})});
-  ["sessions","checkins","foods","myFoods"].forEach(k=>{ if(!Array.isArray(out[k])) out[k] = []; });
-  if(!out.usage || typeof out.usage!=="object") out.usage = {};
-  if(!out.protein || typeof out.protein!=="object") out.protein = {};
+  ["sessions","checkins","foods","myFoods","cardio"].forEach(k=>{ if(!Array.isArray(out[k])) out[k] = []; });
+  ["usage","protein","water","badges"].forEach(k=>{ if(!out[k] || typeof out[k]!=="object" || Array.isArray(out[k])) out[k] = {}; });
+  out.sessions.sort((a,b)=>b.at-a.at); out.checkins.sort((a,b)=>b.at-a.at);   // newest first, everywhere
   return out;
 })();
 let askedPersist = false;
@@ -121,7 +122,7 @@ function persist(){
   return true;
 }
 const UI = Object.assign({tab:"train", skipInstall:false}, lsGet(UIKEY)||{});
-if(!["train","protein","progress"].includes(UI.tab)) UI.tab = "train";
+if(!["train","protein","water","progress"].includes(UI.tab)) UI.tab = "train";
 function saveUI(){ lsSet(UIKEY, UI); }
 
 // A workout in progress survives the app being closed.
@@ -243,6 +244,69 @@ function nextWorkout(){
 }
 function topSet(sets){ return sets.reduce((a,b)=> (b.w>a.w || (b.w===a.w && b.r>a.r)) ? b : a); }
 
+// ---------- streak: weeks in a row with 3+ workouts ----------
+// Weekly, not daily, because the plan is 3–4 days a week. One free pass per 6 weeks covers an exam or
+// sick week: broken streaks make people quit, especially when they blame themselves (Silverman & Barasch 2023).
+const STREAK_MIN = 3;
+function weekKeyOf(ts){ const d = new Date(ts); d.setHours(0,0,0,0); d.setDate(d.getDate() - ((d.getDay()+6)%7)); return d.getTime(); }
+function prevWeek(k){ const d = new Date(k); d.setDate(d.getDate()-7); return d.getTime(); }
+function streakInfo(){
+  const counts = {};
+  DB.sessions.forEach(s=>{ const k = weekKeyOf(s.at); counts[k] = (counts[k]||0)+1; });
+  const thisWeek = weekKeyOf(Date.now()), cur = counts[thisWeek]||0;
+  const oldest = DB.sessions.length ? weekKeyOf(Math.min(...DB.sessions.map(s=>s.at))) : thisWeek;
+  let n = 0, w = prevWeek(thisWeek), i = 0, lastPass = -99, passLastWeek = false;
+  while(w >= oldest){
+    if((counts[w]||0) >= STREAK_MIN) n++;
+    else if(i - lastPass >= 6 && (counts[prevWeek(w)]||0) >= STREAK_MIN){ lastPass = i; if(i===0) passLastWeek = true; }
+    else break;
+    w = prevWeek(w); i++;
+  }
+  const total = n + (cur >= STREAK_MIN ? 1 : 0), need = Math.max(0, STREAK_MIN - cur);
+  let text;
+  if(cur >= STREAK_MIN) text = total+"-week streak";
+  else if(n > 0) text = n+"-week streak · "+need+" more this week keeps it";
+  else text = need===STREAK_MIN ? "3 workouts this week starts a streak" : need+" more this week starts a streak";
+  return {total, n, cur, need, text, passLastWeek};
+}
+
+// ---------- badges: a few real milestones, nothing for just opening the app ----------
+const BADGES = [
+  {id:"first", name:"First workout", how:"Finish your first workout", test:()=>DB.sessions.length>=1},
+  {id:"loop", name:"Full loop", how:"Do all four workouts", test:()=>ROT.every(k=>DB.sessions.some(s=>s.workout===k))},
+  {id:"best", name:"New best", how:"Beat a lift you've done before", test:()=>anyBest()},
+  {id:"w10", name:"10 workouts", how:"Finish 10 workouts", test:()=>DB.sessions.length>=10},
+  {id:"under40", name:"In and out", how:"Finish 10 workouts in 40 minutes or less", test:()=>DB.sessions.filter(s=>s.minutes && s.minutes<=40).length>=10},
+  {id:"streak4", name:"4-week streak", how:"3+ workouts a week, 4 weeks in a row", test:()=>(DB.bestStreak||0)>=4},
+  {id:"protein", name:"Protein week", how:"Hit your protein minimum 5 days in one week", test:()=>proteinWeek()},
+  {id:"w25", name:"25 workouts", how:"Finish 25 workouts", test:()=>DB.sessions.length>=25},
+  {id:"plus25", name:"+25 lb", how:"Add 25 lb to any lift since your first time", test:()=>Object.values(seriesByVariant()).some(a=>Math.max(...a.map(x=>x.w)) - a[0].w >= 25)},
+  {id:"streak12", name:"12-week streak", how:"3+ workouts a week, 12 weeks in a row", test:()=>(DB.bestStreak||0)>=12},
+  {id:"w50", name:"50 workouts", how:"Finish 50 workouts", test:()=>DB.sessions.length>=50}
+];
+function anyBest(){
+  return Object.values(seriesByVariant()).some(a=>{ let m = a[0]; for(let i=1;i<a.length;i++){ const x = a[i]; if(x.w>m.w || (x.w===m.w && x.r>m.r)) return true; } return false; });
+}
+function proteinWeek(){
+  const t = target(); if(!t) return false;
+  const wk = {};
+  Object.keys(DB.protein).forEach(k=>{ if(dayTotal(k) >= t.min){ const [y,m,d] = k.split("-").map(Number); const key = weekKeyOf(new Date(y,m-1,d).getTime()); wk[key] = (wk[key]||0)+1; } });
+  return Object.values(wk).some(n=>n>=5);
+}
+// Awards any badges just earned and returns them. Called after workouts and protein logs, and once at start.
+function checkBadges(){
+  const s = streakInfo().total;
+  let changed = false;
+  if(s > (DB.bestStreak||0)){ DB.bestStreak = s; changed = true; }
+  const fresh = [];
+  BADGES.forEach(b=>{ if(!DB.badges[b.id] && b.test()){ DB.badges[b.id] = Date.now(); fresh.push(b); } });
+  if(fresh.length || changed) persist();
+  return fresh;
+}
+function lifted(entries){ return Math.round(entries.reduce((a,e)=>a+e.sets.reduce((b,s)=>b+(s.w||0)*(s.r||0),0),0)); }
+function heavyThing(lb){ return lb>=12000 ? "an elephant" : lb>=5500 ? "a pickup truck" : lb>=4000 ? "a car" : lb>=1000 ? "a horse" : ""; }
+const FLAME = '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2c1 3.5-1.5 5-1.5 7.5 0 1.4 1 2.5 2.3 2.5 1.6 0 2.4-1.5 2-3.3 2.4 1.6 4.2 4.3 4.2 7.3A7 7 0 0 1 12 23a7 7 0 0 1-7-7c0-4.7 3.6-7.4 5.2-10 .7-1.2 1.3-2.5 1.8-4z"/></svg>';
+
 function startWorkout(){
   const key = S.chosen || nextWorkout();
   draft = {workout:key, startedAt:Date.now(), restEnd:null, restFor:0, entries:{}, skipped:{}, last:null};
@@ -297,6 +361,8 @@ function finishWorkout(){
   DB.sessions.push(doc);
   if(!persist()){ DB.sessions = DB.sessions.filter(x=>x!==doc); toast("Couldn't save on this phone. Your sets are still here."); return; }
   endSession();
+  summary.badges = checkBadges();
+  summary.lifted = lifted(doc.entries);
   S.finish = summary;
   window.scrollTo(0,0); render();
 }
@@ -363,12 +429,24 @@ function render(){
   document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-selected", String(b.dataset.tab===UI.tab)));
   if(install) v.innerHTML = viewInstall();
   else if(UI.tab==="protein") v.innerHTML = viewProtein();
+  else if(UI.tab==="water") v.innerHTML = viewWater();
   else if(UI.tab==="progress") v.innerHTML = viewProgress();
   else if(S.finish) v.innerHTML = viewFinish();
   else if(draft) v.innerHTML = viewSession();
   else v.innerHTML = viewHome();
   numberCites(v);
   tick();
+  writeSwState();
+}
+// A small summary the service worker reads when a reminder arrives, so the notification can say what's next.
+let lastSwState = "";
+function writeSwState(){
+  if(!("caches" in window)) return;
+  const k = dayKey(), t = target(), si = streakInfo();
+  const st = {next:PLAN[nextWorkout()].name, week:weekCount(), goal:WEEK_GOAL, streak: si.total ? si.total+"-week streak" : "",
+    today: DB.sessions.some(s=>dayKey(s.at)===k), protein: Math.round(dayTotal(k)), proteinMin: t ? t.min : null};
+  const json = JSON.stringify(st); if(json===lastSwState) return; lastSwState = json;
+  caches.open("rotation-state").then(c=>c.put("./__state", new Response(json, {headers:{"content-type":"application/json"}}))).catch(()=>{});
 }
 function renderSafe(){
   const a = document.activeElement;
@@ -399,6 +477,7 @@ function viewHome(){
   const first = !DB.sessions.length, doneBefore = DB.sessions.some(s=>s.workout===key);
   let h = '<section style="display:grid;gap:18px">';
   h += '<div class="headrow">'+weekDots(weekCount())+'<button class="x" data-act="guide" aria-label="Guide: the plan and the research">?</button></div>';
+  if(DB.sessions.length){ const si = streakInfo(); h += '<div class="streak'+(si.total?" on":"")+'">'+FLAME+'<span>'+esc(si.text)+(si.passLastWeek ? ' <span class="muted">(free pass used last week)</span>' : '')+'</span></div>'; }
   h += '<div><h1>'+esc(W.name)+'</h1><p class="sub">'+(first ? "Your first workout" : (doneBefore ? esc(W.focus) : "First time doing this one"))+' · about '+W.mins+' min</p>';
   if(key!==nxt) h += '<p class="small muted" style="margin-top:4px">The loop says '+PLAN[nxt].name+' is next.</p>';
   h += '</div><div class="list">';
@@ -410,7 +489,7 @@ function viewHome(){
   h += '</div>';
   if(bonus) h += '<p class="small muted">Bonus if there\'s time: '+esc(bonus.name)+'</p>';
   if(first) h += '<div class="nudge">First time on a machine? Start light. The app learns your weights over your first couple of workouts.</div>';
-  h += '<div class="cta"><button class="btn" data-act="start">Start workout</button><button class="link" data-act="pick">Do a different workout</button></div>';
+  h += '<div class="cta"><button class="btn" data-act="start">Start workout</button><div class="row" style="justify-content:center;gap:4px"><button class="link" data-act="pick">Do a different workout</button><span class="muted">·</span><button class="link" data-act="cardio">Log cardio</button></div></div>';
   return h + '</section>';
 }
 
@@ -478,8 +557,12 @@ function viewWrap(W){
 function viewFinish(){
   const f = S.finish, t = target(), total = Math.round(dayTotal(dayKey()));
   let h = '<section style="display:grid;gap:18px">';
-  h += '<div style="margin-top:8px"><p class="eyebrow">'+f.minutes+' min · '+plural(f.sets,"set")+'</p><h1>'+esc(PLAN[f.workout].name)+' done</h1></div>';
+  h += '<div style="margin-top:8px"><p class="eyebrow">'+f.minutes+' min · '+plural(f.sets,"set")+'</p><h1>'+esc(PLAN[f.workout].name)+' done</h1>'+
+    (f.lifted ? '<p class="sub">You moved <b class="num">'+f.lifted.toLocaleString()+' lb</b> today'+(heavyThing(f.lifted) ? ', about the weight of '+heavyThing(f.lifted) : '')+'.</p>' : '')+'</div>';
   h += weekDots(weekCount());
+  const si = streakInfo();
+  if(si.total) h += '<div class="streak on">'+FLAME+'<span>'+esc(si.text)+'</span></div>';
+  if(f.badges && f.badges.length) f.badges.forEach(b=>{ h += '<div class="badge-new"><span class="medal">★</span><span><small>New badge</small><b>'+esc(b.name)+'</b></span></div>'; });
   if(f.bests.length){
     h += '<div><p class="sec">New bests</p>';
     f.bests.forEach(b=>{ h += '<div class="best"><span class="badge">↑</span><span>'+esc(b.name)+'<small>'+esc(b.top.w)+' × '+esc(b.top.r)+'</small></span><span class="up">'+esc(b.gain)+'</span></div>'; });
@@ -493,6 +576,9 @@ function viewFinish(){
   if(!f.bests.length && !f.starts.length) h += '<p class="muted">Same numbers as last time. Holding steady on a rough day still counts. Beat one rep next time.</p>';
   if(f.heavier.length) h += '<div class="card"><small>Next time, go heavier on</small><b style="font-size:16px">'+esc(f.heavier.join(", "))+'</b><span class="muted small">You hit the top of the rep range on every set</span></div>';
   if(t) h += '<button class="nudge" data-tab="protein"><span>Protein today</span><b>'+total+' of '+t.min+' g ›</b></button>';
+  const cardioToday = DB.cardio.filter(c=>dayKey(c.at)===dayKey());
+  if(cardioToday.length) h += '<p class="small muted">Cardio today: '+cardioToday.map(c=>c.min+' min '+c.type.toLowerCase()).join(", ")+'.</p>';
+  else h += '<button class="btn ghost sm" data-act="cardio">Biking after? Log cardio</button>';
   if(!DB.lastBackup || Date.now() - DB.lastBackup > 7*864e5)
     h += '<div class="card"><small>Back up your log</small><b style="font-size:16px">Last backup: '+(DB.lastBackup ? fmtDate(DB.lastBackup) : "never")+'</b><span class="muted small">Tap Save backup, then Save to Files → iCloud Drive. It keeps your log safe if something happens to your phone.</span><button class="btn ghost sm" style="margin-top:8px" data-act="export">Save backup</button></div>';
   h += '<div class="card"><small>Next time</small><b style="font-size:16px">'+esc(PLAN[nextWorkout()].name)+'</b><span class="muted small">'+esc(PLAN[nextWorkout()].focus)+'</span></div>';
@@ -522,7 +608,8 @@ function addProtein(g, label, key){
   }
   if(edgeOpen){ S.sheet.added = (S.sheet.added||0) + g; refreshEdge(); }
   persist();
-  toast("Added "+Math.round(g)+" g", {label:"Undo", fn:()=>{
+  const fresh = checkBadges();
+  toast("Added "+Math.round(g)+" g"+(fresh.length ? " · New badge: "+fresh.map(b=>b.name).join(", ") : ""), {label:"Undo", fn:()=>{
     const list = DB.protein[k] || []; const ix = list.findIndex(x=>x.t===e.t);
     if(ix>=0) list.splice(ix,1);
     if(!list.length) delete DB.protein[k];
@@ -592,6 +679,95 @@ function viewProtein(){
   return h + '</section>';
 }
 
+// ---------- water ----------
+const WATER_PRESETS = [
+  {oz:101, label:"About 101 oz", note:"National Academies guideline for men, from drinks"},
+  {oz:74, label:"About 74 oz", note:"National Academies guideline for women, from drinks"}
+];
+function waterTotal(k){ return (DB.water[k]||[]).reduce((a,e)=>a+(e.oz||0),0); }
+function addWater(oz){
+  oz = r1(oz); if(!(oz>0)) return;
+  const k = dayKey(), e = {t:Date.now(), oz};
+  (DB.water[k] = DB.water[k] || []).push(e);
+  persist(); render();
+  toast("Added "+oz+" oz", {label:"Undo", fn:()=>{ const list = DB.water[k]||[]; const i = list.findIndex(x=>x.t===e.t); if(i>=0) list.splice(i,1); if(!list.length) delete DB.water[k]; persist(); render(); }});
+}
+function viewWater(){
+  const goal = num(DB.settings.waterGoal), k = dayKey(), total = Math.round(waterTotal(k)), list = DB.water[k] || [];
+  let h = '<section style="display:grid;gap:16px">';
+  h += '<div><p class="eyebrow">Water today</p><div class="big">'+total+'<small>'+(goal ? 'of '+goal+' oz' : 'oz')+'</small></div></div>';
+  if(goal){
+    const scale = Math.max(goal, total) * 1.08;
+    h += '<div class="meter" role="img" aria-label="'+total+' of '+goal+' ounces"><div class="f water" style="width:'+Math.min(100,total/scale*100).toFixed(1)+'%"></div><div class="tick" style="left:'+(goal/scale*100).toFixed(1)+'%"><span>'+goal+'</span></div></div>';
+  } else {
+    h += '<div class="panel"><p class="sec">Pick a daily goal</p>';
+    WATER_PRESETS.forEach(p=>{ h += '<button class="opt" data-act="water-goal" data-oz="'+p.oz+'"><span>'+esc(p.label)+'<br><span class="small muted">'+esc(p.note)+'</span></span><b class="num">'+p.oz+' oz</b></button>'; });
+    h += '<form id="wgoal-form" class="row" style="flex-wrap:nowrap"><label class="field grow"><input id="wg-oz" class="inp" inputmode="decimal" placeholder="Or your own goal"><i>oz</i></label><button class="btn ghost sm" style="width:auto" type="submit">Set</button></form></div>';
+  }
+  h += '<div class="waters"><button class="btn sm" data-act="water" data-oz="8">+8 oz<small>glass</small></button><button class="btn ghost sm" data-act="water" data-oz="16.9">+16.9<small>bottle</small></button><button class="btn ghost sm" data-act="water" data-oz="32">+32 oz<small>big bottle</small></button></div>';
+  h += '<form id="water-form" class="row" style="flex-wrap:nowrap"><label class="field grow"><input id="w-oz" class="inp" inputmode="decimal" placeholder="Other amount"><i>oz</i></label><button class="btn ghost sm" style="width:auto" type="submit">Add</button></form>';
+  if(list.length){
+    h += '<div><p class="sec">Today</p>';
+    list.slice().reverse().forEach((e,ri)=>{ const i = list.length-1-ri; h += '<div class="entry"><span class="g">'+esc(e.oz)+' oz</span><span class="small muted">'+new Date(e.t).toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"})+'</span><button class="x" data-wrm="'+i+'" aria-label="Remove '+esc(e.oz)+' oz">×</button></div>'; });
+    h += '</div>';
+  }
+  const days = [];
+  for(let j=6;j>=0;j--){ const d = new Date(); d.setDate(d.getDate()-j); days.push({k:dayKey(d), d}); }
+  const vs = days.map(x=>Math.round(waterTotal(x.k)));
+  const top = Math.max(goal||0, ...vs, 1) * 1.1;
+  h += '<div><p class="sec">Last 7 days</p><div class="week7" style="margin-top:8px">';
+  if(goal) h += '<div class="goal" style="bottom:'+(18 + goal/top*90).toFixed(0)+'px" aria-hidden="true"></div>';
+  days.forEach((x,j)=>{ const val = vs[j]; h += '<div class="col"><span class="v">'+(val||"")+'</span><div class="b'+(goal && val>=goal ? " hit water" : "")+'" style="height:'+Math.max(val?3:0, val/top*90).toFixed(0)+'px"></div><span class="d">'+x.d.toLocaleDateString(undefined,{weekday:"narrow"})+'</span></div>'; });
+  h += '</div></div>';
+  if(goal) h += '<button class="link" data-act="water-goal-reset">Change goal ('+goal+' oz)</button>';
+  h += $("#water-notes").innerHTML;
+  return h + '</section>';
+}
+
+// ---------- cardio ----------
+const CARDIO_TYPES = ["Bike","Treadmill","Elliptical","Other"];
+function sheetCardio(){
+  const sh = S.sheet;
+  let h = head("Log cardio", "Cancel");
+  h += '<div class="seg" style="grid-template-columns:repeat(4,1fr)">'+CARDIO_TYPES.map(t=>'<button aria-pressed="'+(sh.type===t)+'" data-act="cardio-type" data-t="'+t+'">'+t+'</button>').join("")+'</div>';
+  h += '<p class="sec">Minutes</p><div class="stepper"><button data-act="cardio-min" data-d="-5" aria-label="5 minutes less">−</button><output class="num" style="font-size:28px;font-weight:700">'+sh.min+'</output><button data-act="cardio-min" data-d="5" aria-label="5 minutes more">+</button></div>';
+  h += '<button class="btn" data-act="cardio-save">Save '+sh.min+' min '+esc(sh.type.toLowerCase())+'</button>';
+  h += '<p class="small muted">Do it after lifting, not before, so your lifts get your best effort. A 5-minute easy warm-up on the bike before lifting is fine.</p>';
+  return h;
+}
+
+// ---------- reminders (web push) ----------
+const VAPID_PUBLIC = "BFPUvKQVWbxez_lPrl4iI93uml_Ig89SnC-KKq98cQqmgJ8wz2nVDPrkqg-Yijo4zmAWapQNbFcDpd_yl02uEog";
+function b64ToU8(s){ const p = "=".repeat((4 - s.length % 4) % 4); const b = atob((s + p).replace(/-/g,"+").replace(/_/g,"/")); return Uint8Array.from(b, c=>c.charCodeAt(0)); }
+function pushSupported(){ return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window; }
+async function remindersOn(){
+  if(!pushSupported()){ toast("Notifications need the installed app on iOS 16.4 or newer."); return; }
+  if(isIOS && !isStandalone()){ toast("Open Rotation from your Home Screen first."); return; }
+  try{
+    const perm = await Notification.requestPermission();
+    if(perm!=="granted"){ toast("Notifications are off for Rotation. Turn them on in Settings → Notifications → Rotation."); return; }
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if(!sub) sub = await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:b64ToU8(VAPID_PUBLIC)});
+    DB.settings.pushSub = sub.toJSON(); persist(); render();
+    toast("Reminders are on for this phone");
+  }catch(e){ toast("Couldn't turn on reminders: "+(e && e.message ? e.message : "unknown error")); }
+}
+async function remindersOff(){
+  try{ const reg = await navigator.serviceWorker.ready; const sub = await reg.pushManager.getSubscription(); if(sub) await sub.unsubscribe(); }catch(e){}
+  DB.settings.pushSub = null; persist(); render(); toast("Reminders are off");
+}
+function remindersHtml(){
+  let h = '<p class="sec" style="margin-top:6px">Workout reminders</p>';
+  if(!pushSupported()) return h + '<p class="small muted">Reminders need the installed app on iOS 16.4 or newer.</p>';
+  if(isIOS && !isStandalone()) return h + '<p class="small muted">Open Rotation from your Home Screen to turn on reminders.</p>';
+  const on = DB.settings.pushSub && Notification.permission==="granted";
+  if(!on) return h + '<p class="small muted">Mon, Tue, Thu and Fri around 2:40 pm, right after lunch. The reminder says which workout is next, and on days you already trained it checks your protein instead.</p><button class="btn sm" style="width:auto;justify-self:start" data-act="push-on">Turn on reminders</button>';
+  return h + '<p class="small">On for this phone: Mon, Tue, Thu, Fri around 2:40 pm.</p>'+
+    '<p class="small muted">One-time step: copy this phone\'s reminder code and paste it to Claude, which connects it to the reminder schedule. You only need to do it again if you turn reminders off and on.</p>'+
+    '<div class="row"><button class="btn sm" style="width:auto" data-act="copy-push">Copy reminder code</button><button class="btn ghost sm" style="width:auto" data-act="push-off">Turn off</button></div>';
+}
+
 // ---------- progress ----------
 function spark(vals){
   if(vals.length<2) return '<svg viewBox="0 0 112 34" aria-hidden="true"></svg>';
@@ -615,6 +791,12 @@ function viewProgress(){
   const avgMin = DB.sessions.length ? Math.round(DB.sessions.reduce((a,s)=>a+(s.minutes||0),0)/DB.sessions.length) : 0;
   h += '<div class="stats"><div class="stat"><b class="num">'+weekCount()+'</b><span>this week (goal '+WEEK_GOAL+')</span></div><div class="stat"><b class="num">'+DB.sessions.length+'</b><span>workouts total</span></div><div class="stat"><b class="num">'+(avgMin||"–")+'</b><span>average minutes</span></div></div>';
 
+  const si = streakInfo();
+  h += '<div class="panel"><div class="headrow"><p class="sec">Streak and badges</p><span class="small muted">best streak: '+plural(DB.bestStreak||0,"week")+'</span></div>';
+  h += '<div class="streak'+(si.total?" on":"")+'">'+FLAME+'<span>'+esc(si.text)+'</span></div><div class="badges">';
+  BADGES.forEach(b=>{ const got = DB.badges[b.id]; h += '<div class="bdg'+(got?" got":"")+'"><span class="medal">'+(got?"★":"☆")+'</span><span><b>'+esc(b.name)+'</b><small>'+(got ? "Earned "+fmtDate(got) : esc(b.how))+'</small></span></div>'; });
+  h += '</div></div>';
+
   const series = seriesByVariant(), names = Object.keys(series);
   h += '<div class="panel"><p class="sec">Strength</p>';
   if(!names.length) h += '<p class="muted">Finish your first workout and each exercise shows up here with its trend. Rising numbers are the earliest sign you\'re building muscle, weeks before the mirror shows it.</p>';
@@ -626,6 +808,12 @@ function viewProgress(){
     }
     h += '</div>';
   }
+  h += '</div>';
+
+  const ws = weekStart(), cw = DB.cardio.filter(c=>c.at>=ws);
+  h += '<div class="panel"><div class="headrow"><p class="sec">Cardio</p><button class="link" style="padding:0" data-act="cardio">+ Log cardio</button></div>';
+  h += '<p class="small">This week: <b class="num">'+cw.reduce((a,c)=>a+c.min,0)+' min</b> in '+plural(cw.length,"session")+'</p>';
+  DB.cardio.slice().sort((a,b)=>b.at-a.at).slice(0,5).forEach(c=>{ h += '<div class="entry"><span class="g">'+c.min+' min</span><span>'+esc(c.type)+' <span class="small muted">'+fmtDate(c.at)+'</span></span><button class="x" data-crm="'+esc(c.id)+'" aria-label="Delete this cardio entry">×</button></div>'; });
   h += '</div>';
 
   h += '<div class="panel"><p class="sec">History</p>';
@@ -662,6 +850,8 @@ function viewProgress(){
     '<button class="btn ghost sm" style="width:auto;justify-self:start" data-act="test-sound">Test the beep</button>'+
     '<label class="small muted" for="set-fdc">Your USDA food search key (optional). The shared key allows about 10 searches an hour; a free personal key allows 1,000. <a href="https://fdc.nal.usda.gov/api-key-signup" target="_blank" rel="noopener">Get one free</a>, then paste it here. It stays on this phone.</label>'+
     '<input id="set-fdc" class="inp" autocomplete="off" autocapitalize="off" spellcheck="false" value="'+esc(DB.settings.fdcKey||"")+'" placeholder="Paste your key">'+
+    remindersHtml()+
+    '<p class="sec" style="margin-top:6px">Backup</p>'+
     '<p class="small muted">Your log is stored only on this phone. Export a backup every couple of weeks so a lost or reset phone doesn\'t take it with it.</p>'+
     (stale && (DB.sessions.length || DB.checkins.length) ? '<p class="note err">Last backup: '+lb+'.</p>' : '<p class="small muted">Last backup: '+lb+'.</p>')+
     '<div class="row"><button class="btn sm" style="width:auto" data-act="export">Export backup</button><label class="btn ghost sm" style="width:auto" for="imp-file">Import</label><input id="imp-file" type="file" hidden><button class="btn ghost sm" style="width:auto" data-act="copy-backup">Copy as text</button></div>'+
@@ -686,7 +876,7 @@ function renderSheet(){
   if(!sh){ root.innerHTML = ""; return; }
   const fn = {overview:sheetOverview, end:sheetEnd, howto:sheetHowto, swap:sheetSwap, pick:sheetPick, guide:sheetGuide,
     addfood:sheetAddFood, plate:sheetPlate, editfood:sheetEditFood, todaylog:sheetTodayLog, edge:sheetEdge,
-    lookup:sheetLookup, portion:sheetPortion,
+    lookup:sheetLookup, portion:sheetPortion, cardio:sheetCardio,
     edit:sheetEdit, exhist:()=>sheetExHist(sh.variant), scan:sheetScan, food:sheetFood}[sh.kind];
   const full = ["scan","guide","edge","lookup"].includes(sh.kind);
   root.innerHTML = '<div class="sheet" data-scrim="1"><div class="sheet-in'+(full?" full":"")+'" role="dialog" aria-modal="true">'+fn()+'</div></div>';
@@ -747,6 +937,7 @@ function guidePlan(){
     '<li><b>Getting stronger:</b> when you hit the top of the rep range on every set, go up one pin next time. The app fills that in for you.</li>'+
     '<li><b>Paired exercises</b> alternate automatically with short rests, which saves about 40% of the time. If the rec is packed, use Skip and come back, or swap machines.</li>'+
     '<li><b>Rest beep:</b> plays over your music, but only with the silent switch on ring. Keep the app open; the screen stays on.</li>'+
+    '<li><b>Cardio:</b> ride the bike <i>after</i> lifting, not before. 20 minutes 3–4 times a week won\'t cost you muscle, and lifting first keeps your best effort for the weights. A 5-minute easy spin as a warm-up is fine. It\'s optional and doesn\'t count against the 40 minutes.</li>'+
     '</ul></section>';
   h += '<section class="guide-sec"><h2>When the rec is packed</h2><ul class="rules">'+
     '<li>Tap <b>Machine taken?</b> and pick a free swap. Don\'t wait more than about 2 minutes.</li>'+
@@ -1270,6 +1461,8 @@ document.addEventListener("click", e=>{
   if(d.exhist){ openSheet("exhist", {variant:d.exhist}); return; }
   if(d.edit){ openEdit(d.edit); return; }
   if(d.delci){ DB.checkins = DB.checkins.filter(x=>x.id!==d.delci); persist(); render(); toast("Check-in deleted"); return; }
+  if(d.crm){ DB.cardio = DB.cardio.filter(x=>x.id!==d.crm); persist(); render(); toast("Cardio entry deleted"); return; }
+  if(d.wrm){ const k = dayKey(), list = DB.water[k] || []; list.splice(+d.wrm, 1); if(!list.length) delete DB.water[k]; persist(); render(); return; }
   if(d.prm){ const k = dayKey(), list = DB.protein[k] || []; list.splice(+d.prm, 1); if(!list.length) delete DB.protein[k]; persist(); render(); renderSheet(); return; }
   if(d.step && S.sheet){ syncFoodInputs(); S.sheet.servings = Math.max(0.5, Math.min(20, S.sheet.servings + parseFloat(d.step))); renderSheet(); return; }
   if(d.addset && S.edit){ const e2 = S.edit.entries[+d.addset], last = e2.sets[e2.sets.length-1]; e2.sets.push({w:last?last.w:0, r:last?last.r:0}); renderSheet(); return; }
@@ -1309,6 +1502,17 @@ document.addEventListener("click", e=>{
     // protein
     case "addfood": openSheet("addfood", {}); setTimeout(()=>{ const n = $("#af-name"); n && n.focus(); }, 50); return;
     case "edge": openSheet("edge", {meal:mealNow(), q:"", added:0}); return;
+    case "cardio": openSheet("cardio", {type:"Bike", min:20}); return;
+    case "cardio-type": S.sheet.type = d.t; renderSheet(); return;
+    case "cardio-min": S.sheet.min = Math.max(5, Math.min(180, S.sheet.min + parseInt(d.d,10))); renderSheet(); return;
+    case "cardio-save": { const c = {id:"k"+Date.now().toString(36), at:Date.now(), type:S.sheet.type, min:S.sheet.min}; DB.cardio.push(c); persist(); closeSheet(); render();
+      toast("Logged "+c.min+" min "+c.type.toLowerCase(), {label:"Undo", fn:()=>{ DB.cardio = DB.cardio.filter(x=>x.id!==c.id); persist(); render(); }}); return; }
+    case "water": addWater(parseFloat(d.oz)); return;
+    case "water-goal": DB.settings.waterGoal = parseFloat(d.oz); persist(); render(); return;
+    case "water-goal-reset": DB.settings.waterGoal = null; persist(); render(); return;
+    case "push-on": remindersOn(); return;
+    case "push-off": remindersOff(); return;
+    case "copy-push": navigator.clipboard.writeText(JSON.stringify(DB.settings.pushSub)).then(()=>toast("Copied. Paste it to Claude."), ()=>toast("Couldn't copy. Long-press to select it instead.")); return;
     case "lookup": openSheet("lookup", {q:"", results:null, status:""}); setTimeout(()=>{ const n = $("#lk-q"); n && n.focus(); }, 50); return;
     case "lk-pick": pickLookup(+d.i); return;
     case "lk-manual": { const q = S.sheet && S.sheet.q; closeSheet(); openSheet("addfood", {name:q||"", where:""}); return; }
@@ -1413,6 +1617,8 @@ document.addEventListener("submit", e=>{
     addProtein(food.g, food.name, "my:"+food.id);
     closeSheet(); render();
   }
+  if(f.id==="water-form"){ const v = num($("#w-oz").value); if(v && v>0 && v<200){ addWater(v); } else toast("Enter the ounces."); return; }
+  if(f.id==="wgoal-form"){ const v = num($("#wg-oz").value); if(v && v>=16 && v<=300){ DB.settings.waterGoal = Math.round(v); persist(); render(); } else toast("Enter a goal in ounces, like 90."); return; }
   if(f.id==="lookup-form"){ const q = $("#lk-q").value; $("#lk-q").blur(); runLookup(q); return; }
   if(f.id==="edge-add-form"){
     const name = (S.sheet.q||"").trim(), g = num($("#ea-g").value);
@@ -1498,9 +1704,17 @@ function importBackup(text){
   }
   (d.foods||[]).forEach(f=>{ if(f && f.code && !DB.foods.some(x=>x.code===f.code)) DB.foods.push(f); });
   (d.myFoods||[]).forEach(f=>{ if(f && f.id && !DB.myFoods.some(x=>x.id===f.id)) DB.myFoods.push(f); });
+  (d.cardio||[]).forEach(c=>{ if(c && c.id && !DB.cardio.some(x=>x.id===c.id)) DB.cardio.push(c); });
+  if(d.water && typeof d.water==="object") Object.keys(d.water).forEach(k=>{
+    const have = DB.water[k] || [];
+    (d.water[k]||[]).forEach(e=>{ if(e && e.t && !have.some(x=>x.t===e.t)) have.push({t:e.t, oz:num(e.oz)||0}); });
+    if(have.length) DB.water[k] = have.sort((a,b)=>a.t-b.t);
+  });
+  if(d.badges && typeof d.badges==="object") Object.keys(d.badges).forEach(k=>{ if(!DB.badges[k]) DB.badges[k] = d.badges[k]; });
+  if(d.settings && !DB.settings.waterGoal && d.settings.waterGoal) DB.settings.waterGoal = d.settings.waterGoal;
   if(d.usage && typeof d.usage==="object") Object.keys(d.usage).forEach(k=>{ if(!DB.usage[k]) DB.usage[k] = d.usage[k]; });
   if(d.settings && !DB.settings.bodyweight && d.settings.bodyweight) DB.settings.bodyweight = d.settings.bodyweight;
-  persist(); render();
+  persist(); checkBadges(); render();
   toast("Imported "+plural(ns,"workout")+" and "+plural(nc,"check-in"));
 }
 
@@ -1508,6 +1722,7 @@ function importBackup(text){
 // Boot
 // =====================================================================
 if(draft){ normalizeDraft(); startTicker(); }
+checkBadges();
 render();
 if("serviceWorker" in navigator){ window.addEventListener("load", ()=>{ navigator.serviceWorker.register("sw.js").catch(()=>{}); }); }
 })();

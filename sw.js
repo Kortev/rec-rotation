@@ -1,8 +1,9 @@
 // Offline support. The app's own files are served from the cache and refreshed in the
 // background, so the app opens instantly with no signal and picks up updates on the next launch.
 // Bump VERSION whenever the list of app files changes.
-const VERSION = "rotation-v3";
+const VERSION = "rotation-v4";
 const RUNTIME = "rotation-runtime";
+const STATE = "rotation-state";   // small summary the app writes so reminders can say what's next
 const SHELL = [
   "./", "./index.html", "./styles.css", "./app.js", "./manifest.webmanifest",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png", "./icons/favicon-32.png"
@@ -15,7 +16,7 @@ self.addEventListener("install", e => {
 self.addEventListener("activate", e => {
   e.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== VERSION && k !== RUNTIME).map(k => caches.delete(k))))
+      .then(keys => Promise.all(keys.filter(k => k !== VERSION && k !== RUNTIME && k !== STATE).map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -55,4 +56,32 @@ self.addEventListener("fetch", e => {
       return res;
     }));
   }
+});
+
+// Workout reminders. The reminder job only wakes the phone; the words come from the app's own
+// summary, so the notification can say what's next and skip nagging on days you already trained.
+self.addEventListener("push", e => {
+  e.waitUntil((async () => {
+    let st = {};
+    try { const cache = await caches.open(STATE); const r = await cache.match("./__state"); if (r) st = await r.json(); } catch (_) {}
+    let title = "Workout day", body = "Your next workout is about 35 minutes.";
+    if (st.today) {
+      title = "Nice work today";
+      body = st.proteinMin ? "Protein so far: " + st.protein + " of " + st.proteinMin + " g." : "Remember to get your protein in.";
+    } else if (st.next) {
+      title = st.next + " is next";
+      body = (st.week || 0) + " of " + (st.goal || 4) + " this week" + (st.streak ? " · " + st.streak : "") + ". About 35 minutes.";
+    }
+    await self.registration.showNotification(title, {
+      body, icon: "icons/icon-192.png", badge: "icons/icon-192.png", tag: "rotation-reminder", data: { url: "./" }
+    });
+  })());
+});
+
+self.addEventListener("notificationclick", e => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(list => {
+    for (const c of list) { if ("focus" in c) return c.focus(); }
+    return self.clients.openWindow("./");
+  }));
 });
