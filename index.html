@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Rotation</title>
+<meta name="description" content="A four-workout, 40-minute lifting loop with a set logger, rest timer, protein counter and progress tracking.">
+<meta name="theme-color" content="#141A1F">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Rotation">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1 id="title">Today</h1>
+    <p class="sub" id="subline">Four short workouts in a loop. Do the next one whenever you go.</p>
+  </header>
+  <main id="view" aria-live="polite"></main>
+</div>
+
+<div class="bar" id="bar" hidden>
+  <div class="bar-in">
+    <div style="display:grid;gap:5px;min-width:0">
+      <div class="stackrow" id="stack" aria-hidden="true"></div>
+      <div class="clock" id="clock">0:00 of 40:00</div>
+    </div>
+    <button class="rest" id="rest" aria-label="Rest timer"><small>Rest</small>–</button>
+    <div class="msg" id="barmsg" hidden></div>
+  </div>
+</div>
+
+<nav class="tabs" aria-label="Sections">
+  <div class="in" role="tablist">
+    <button role="tab" data-tab="today" aria-selected="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 7v10M18 7v10M3 10v4M21 10v4M6 12h12"/></svg>Today</button>
+    <button role="tab" data-tab="protein" aria-selected="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 9h16l-1.5 10a2 2 0 0 1-2 1.7h-9a2 2 0 0 1-2-1.7z"/><path d="M8 9V6a4 4 0 0 1 8 0v3"/></svg>Protein</button>
+    <button role="tab" data-tab="progress" aria-selected="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>Progress</button>
+    <button role="tab" data-tab="plan" aria-selected="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 9h6M9 13h6M9 17h3"/></svg>Plan</button>
+    <button role="tab" data-tab="why" aria-selected="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5v.01"/></svg>Why</button>
+  </div>
+</nav>
+
+<div id="sheet-root"></div>
+<template id="plan-extra">
+  <section class="panel">
+    <h2>How much each muscle gets</h2>
+    <p class="small muted">Hard sets per week if you get all 4 workouts in. Research puts the efficient range around 6–12 sets per muscle per week. About 4 is the least that still produces growth you can measure.<sup><a class="cite" href="#src-pelland"></a></sup> At 3 workouts a week you get about three-quarters of this, which still works.</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Muscle</th><th class="num">Sets / week</th><th>Why it's in the plan</th></tr></thead>
+      <tbody>
+        <tr><td>Side delts</td><td class="num mono">10</td><td>Wider shoulders, the top priority for your goal</td></tr>
+        <tr><td>Quads</td><td class="num mono">8</td><td>Your biggest muscles</td></tr>
+        <tr><td>Hamstrings</td><td class="num mono">8</td><td>Balance for the quads</td></tr>
+        <tr><td>Chest</td><td class="num mono">6</td><td>Upper-body size</td></tr>
+        <tr><td>Back</td><td class="num mono">6</td><td>Upper-body width and thickness</td></tr>
+        <tr><td>Biceps, triceps</td><td class="num mono">2 + more</td><td>They also work in every press and pull</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+  <section class="panel">
+    <h2>What you'll see, and when</h2>
+    <div class="wk">
+      <div class="wk-row"><span class="t">1–3</span><span>Your weights climb fast. That's mostly your brain learning the moves. Any extra size this early is mostly swelling, not muscle.<sup><a class="cite" href="#src-damas"></a></sup></span><span class="d">weeks</span></div>
+      <div class="wk-row"><span class="t">3–8</span><span>Real muscle growth starts. A tape measure catches it before the mirror does.<sup><a class="cite" href="#src-damas"></a></sup></span><span class="d">weeks</span></div>
+      <div class="wk-row"><span class="t">8–12</span><span>Trained muscles are typically 5–10% bigger. The average beginner adds about 1.5 kg (3.3 lb) of lean mass in the first 10 weeks.<sup><a class="cite" href="#src-benito"></a></sup></span><span class="d">weeks</span></div>
+      <div class="wk-row"><span class="t">4–8</span><span>Your haircut grows back. Hair grows about 1 cm (under half an inch) a month.<sup><a class="cite" href="#src-hair"></a></sup></span><span class="d">weeks</span></div>
+    </div>
+  </section>
+  <section class="panel">
+    <h2>Food and sleep</h2>
+    <ul class="rules">
+      <li><b>Don't diet.</b> Eat about what you burn, or a little more. In a meta-analysis, a deficit of about 500 calories a day stopped lean-mass gains.<sup><a class="cite" href="#src-murphy"></a></sup> Lifting alone, with no diet change, lowered body fat by about 1.5 percentage points on average.<sup><a class="cite" href="#src-wewege"></a></sup></li>
+      <li><b>If you'd rather gain a little,</b> aim for 0.25–0.5% of your bodyweight a week. At 150 lb that's about ½ lb a week. Faster than that is mostly fat.<sup><a class="cite" href="#src-iraki"></a></sup></li>
+      <li><b>Protein: 0.7–1 g per pound of bodyweight a day.</b> At 150 lb that's 105–150 g. In the biggest analysis, muscle gains stopped improving around 0.7 g/lb, and 1 g/lb covers the uncertainty.<sup><a class="cite" href="#src-morton"></a></sup> When you eat it barely matters. The daily total is what counts, and the Protein tab keeps count for you.</li>
+      <li><b>Sleep 7–9 hours.</b> When people dieted on 5½ hours of sleep, more of the weight they lost came from muscle and less from fat.<sup><a class="cite" href="#src-nedeltcheva"></a></sup></li>
+      <li><b>Creatine (optional).</b> 3–5 g of creatine monohydrate a day, any time. With lifting it adds about 1 kg of lean mass on average, and part of that is water.<sup><a class="cite" href="#src-delpino"></a></sup> It's one of the most studied supplements and is considered safe for healthy people. The hair-loss claim didn't hold up in a trial that actually measured hair.<sup><a class="cite" href="#src-kreider"></a></sup> Skip it if you have kidney problems.</li>
+    </ul>
+  </section>
+</template>
+
+<template id="checkin-help">
+  <p class="small muted">Every 4 weeks: in the morning, after the bathroom and before eating. Same tape, same spots. Waist is your best fat gauge. If it holds steady while your shoulders, arms and lifts go up, the plan is working. Take a face photo in the same spot and light each time, at least an hour after you get up, since lying down shifts a little fluid into your face.</p>
+</template>
+
+<template id="why-src">
+  <section class="panel prose">
+    <h2>The short version</h2>
+    <p>You can't burn fat off your face specifically, and at 14% there may not be much to lose. A diet would mostly cost you the muscle you're trying to build. What changes how you look is <b>more muscle, especially wider shoulders</b>, plus the haircut growing out. That's what this plan is built around. Sessions stay short because short, focused workouts build muscle nearly as well as long ones.</p>
+  </section>
+
+  <section class="panel prose">
+    <div class="row"><h2>Your face</h2><span class="verdict yes">Well supported</span></div>
+    <p><b>Face fat follows total body fat.</b> Across studies, how fat a face looks lines up closely with BMI and body fat (correlation 0.71).<sup><a class="cite" href="#src-dejager"></a></sup> Training a body part doesn't burn the fat on it. In one 12-week trial, training only one leg took fat off the arms and trunk, not off that leg.<sup><a class="cite" href="#src-ramirez"></a></sup></p>
+    <p><b>It takes a lot of weight change before a face looks different.</b> People only noticed a change in someone's face after about 1.3 BMI points, which is roughly 8–9 lb for an average-height guy.<sup><a class="cite" href="#src-rerule"></a></sup> If you're really at 14%, losing that much means dieting, and dieting stalls muscle gain.<sup><a class="cite" href="#src-murphy"></a></sup></p>
+    <p><b>Your 14% may not be accurate.</b> Bathroom scales and handheld body-fat devices can be off by up to about 10 points for one person. In a 2025 test against a lab scan, even the best of six devices had that kind of spread.<sup><a class="cite" href="#src-irwin"></a></sup> Your real number could be anywhere from high single digits to around 20%. That's why the Progress tab tracks your waist, measurements and lifts instead.</p>
+  </section>
+
+  <section class="panel prose">
+    <div class="row"><h2>Your roommate's tip: neck and traps</h2><span class="verdict part">Not proven</span></div>
+    <p><b>Neck training does grow neck muscle.</b> Students who added weighted neck work for 12 weeks grew their neck muscles about 13% on MRI. Regular lifting with squats, deadlifts and rows didn't grow the neck at all.<sup><a class="cite" href="#src-conley"></a></sup> But the outside measurement barely moves. One study found about a third of a centimeter after 7 weeks.<sup><a class="cite" href="#src-rotto"></a></sup></p>
+    <p><b>No study has tested whether a bigger neck or traps makes a face look leaner.</b> It's a guess based on proportions. One visual-illusion demo points the other way: a wider neck and jaw made the whole head look wider.<sup><a class="cite" href="#src-morikawa"></a></sup> The evidence that shrugs grow the traps is thin too.</p>
+    <p><b>What is supported is shoulder width.</b> Broader shoulders compared with hips were rated more attractive,<sup><a class="cite" href="#src-pazhoohi"></a></sup> and how strong a man's upper body looked explained most of how attractive his body was rated.<sup><a class="cite" href="#src-sell"></a></sup> So this plan puts its extra sets into lateral raises (10 a week) and keeps shrugs as a bonus.</p>
+    <p class="small muted">If you want to try neck work anyway: 1 set of neck curls and 1 set of neck extensions, twice a week, 15–25 reps with a very light plate, adding reps before weight. That's coaching advice, not a tested protocol. Stop if anything pinches or tingles.</p>
+  </section>
+
+  <section class="panel prose">
+    <div class="row"><h2>Face yoga, jawline trainers, gum</h2><span class="verdict">Skip them</span></div>
+    <p>The best-known face-exercise study found the cheeks got <i>fuller</i>, not slimmer, and it had 16 finishers and no comparison group.<sup><a class="cite" href="#src-alam"></a></sup> A 6-month gum-chewing trial didn't change jaw-muscle size or jaw shape.<sup><a class="cite" href="#src-jung"></a></sup> If a jaw trainer did grow your jaw muscle, it would make your lower face <i>wider</i>. Doctors shrink that same muscle with Botox to narrow the jaw.</p>
+  </section>
+
+  <section class="panel prose">
+    <div class="row"><h2>The haircut</h2><span class="verdict">Barber rule of thumb</span></div>
+    <p>Almost no research tests how hairstyles change face shape. The only study found was a 1998 paper using one face: longer hair with bangs made it look rounder, and a shorter cut looked slimmer.<sup><a class="cite" href="#src-korean"></a></sup> The usual barber advice for a fuller face is <b>more height on top and tighter sides</b>, which makes the face look longer. Treat that as a rule of thumb, not science. Hair grows about 1 cm a month, so you'll have options again soon.<sup><a class="cite" href="#src-hair"></a></sup></p>
+  </section>
+
+  <section class="panel prose">
+    <div class="row"><h2>Puffy days</h2><span class="verdict">Mixed evidence</span></div>
+    <p>Faces do look different from day to day, but the research is weak. In one study, people kept awake for 31 hours had more swollen-looking eyes,<sup><a class="cite" href="#src-sundelin"></a></sup> but a larger study of one sleepless night found no difference.<sup><a class="cite" href="#src-holding"></a></sup> No study has measured salt and face puffiness. Lying down shifts a little fluid into your face, so don't judge your face right after you wake up.</p>
+  </section>
+
+  <section class="panel prose">
+    <div class="row"><h2>Why short workouts work</h2><span class="verdict yes">Well supported</span></div>
+    <ul class="rules">
+      <li><b>More sets help, with steep diminishing returns.</b> Around 4 hard sets per muscle per week already produces growth you can measure. Beyond about 10, each extra gain costs a lot more gym time.<sup><a class="cite" href="#src-pelland"></a>,<a class="cite" href="#src-schoenfeld17"></a></sup> Five or six exercises is enough. Eight or nine is where people start skipping.</li>
+      <li><b>Paired sets save about 40% of the time.</b> Alternating two moves that use opposite muscles, like a chest press and a pulldown, did the same work in much less time: 24 minutes instead of 42 in one study.<sup><a class="cite" href="#src-zhang"></a>,<a class="cite" href="#src-weakley"></a></sup> They feel harder, which is the trade-off.</li>
+      <li><b>60–90 seconds of rest is enough.</b> Resting longer than about 90 seconds showed no clear extra benefit.<sup><a class="cite" href="#src-singer"></a></sup> With paired sets, each muscle rests longer than the clock shows.</li>
+      <li><b>Machines build muscle as well as free weights.</b><sup><a class="cite" href="#src-haugen"></a></sup> They're easier to learn, and your rec has plenty of them.</li>
+      <li><b>You don't need to go to failure.</b> Stopping a rep or two short grew muscle about as well as going all the way.<sup><a class="cite" href="#src-refalo"></a></sup></li>
+      <li><b>The 4-day split isn't magic.</b> With the same weekly sets, training a muscle twice a week grew it about as much as once.<sup><a class="cite" href="#src-schoenfeld19"></a></sup> The split exists so no single session gets long.</li>
+      <li><b>Heavy work first, easy work last.</b> Beginners who did their hardest lifting first remembered the session as more pleasant.<sup><a class="cite" href="#src-hutchinson"></a></sup> How a workout feels predicts whether people come back, and lack of time is students' top reason for not exercising.<sup><a class="cite" href="#src-silva"></a></sup></li>
+    </ul>
+  </section>
+
+  <section class="panel">
+    <h2>Sources</h2>
+    <p class="small muted">Each study's abstract or full text was read, except where marked. The numbers on this page come from these papers.</p>
+    <ol class="sources" id="sources">
+      <li id="src-pelland">Pelland et al. 2026, <i>Sports Medicine</i>. Weekly sets and muscle growth (67 studies). <a href="https://doi.org/10.1007/s40279-025-02344-w" target="_blank" rel="noopener">doi.org/10.1007/s40279-025-02344-w</a></li>
+      <li id="src-schoenfeld17">Schoenfeld et al. 2017, <i>J Sports Sciences</i>. Weekly sets dose-response. <a href="https://doi.org/10.1080/02640414.2016.1210197" target="_blank" rel="noopener">doi.org/10.1080/02640414.2016.1210197</a></li>
+      <li id="src-zhang">Zhang et al. 2025, <i>Sports Medicine</i>. Supersets meta-analysis. <a href="https://doi.org/10.1007/s40279-025-02176-8" target="_blank" rel="noopener">doi.org/10.1007/s40279-025-02176-8</a></li>
+      <li id="src-weakley">Weakley et al. 2017, <i>Eur J Applied Physiology</i>. Superset session times. <a href="https://eprints.leedsbeckett.ac.uk/id/eprint/3890/" target="_blank" rel="noopener">eprints.leedsbeckett.ac.uk/id/eprint/3890</a></li>
+      <li id="src-singer">Singer et al. 2024, <i>Frontiers in Sports and Active Living</i>. Rest intervals. <a href="https://doi.org/10.3389/fspor.2024.1429789" target="_blank" rel="noopener">doi.org/10.3389/fspor.2024.1429789</a></li>
+      <li id="src-haugen">Haugen et al. 2023, <i>BMC Sports Sci Med Rehabil</i>. Machines vs free weights. <a href="https://doi.org/10.1186/s13102-023-00713-4" target="_blank" rel="noopener">doi.org/10.1186/s13102-023-00713-4</a></li>
+      <li id="src-schoenfeld19">Schoenfeld et al. 2019, <i>J Sports Sciences</i>. Training frequency. <a href="https://doi.org/10.1080/02640414.2018.1555906" target="_blank" rel="noopener">doi.org/10.1080/02640414.2018.1555906</a></li>
+      <li id="src-refalo">Refalo et al. 2023, <i>Sports Medicine</i>. Training to failure. <a href="https://doi.org/10.1007/s40279-022-01784-y" target="_blank" rel="noopener">doi.org/10.1007/s40279-022-01784-y</a></li>
+      <li id="src-hutchinson">Hutchinson et al. 2023, <i>J Sport &amp; Exercise Psychology</i>. Exercise order and how a session is remembered. <a href="https://doi.org/10.1123/jsep.2022-0243" target="_blank" rel="noopener">doi.org/10.1123/jsep.2022-0243</a></li>
+      <li id="src-silva">Silva et al. 2022, <i>PLoS ONE</i>. Students' barriers to exercise. <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC8979430/" target="_blank" rel="noopener">pmc.ncbi.nlm.nih.gov/articles/PMC8979430</a></li>
+      <li id="src-damas">Damas et al. 2016, <i>Eur J Applied Physiology</i>. Early swelling vs real growth. <a href="https://doi.org/10.1007/s00421-015-3243-4" target="_blank" rel="noopener">doi.org/10.1007/s00421-015-3243-4</a></li>
+      <li id="src-benito">Benito et al. 2020, <i>IJERPH</i>. Lean-mass gains in beginners (111 studies). <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC7068252/" target="_blank" rel="noopener">pmc.ncbi.nlm.nih.gov/articles/PMC7068252</a></li>
+      <li id="src-conley">Conley et al. 1997, <i>Eur J Applied Physiology</i>. Neck training and neck muscle size. <a href="https://pubmed.ncbi.nlm.nih.gov/9189733" target="_blank" rel="noopener">pubmed.ncbi.nlm.nih.gov/9189733</a></li>
+      <li id="src-rotto">Rotto et al. 2020, <i>Orthopaedic J Sports Medicine</i> (abstract). Neck circumference change. <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC7238813" target="_blank" rel="noopener">pmc.ncbi.nlm.nih.gov/articles/PMC7238813</a></li>
+      <li id="src-morikawa">Morikawa 2012. Head-size illusion demo (not peer-reviewed; read as a summary). <a href="https://www.psy.ritsumei.ac.jp/akitaoka/sakkon/Morikawa2012-Head_Size_Illusion_(English_version).pdf" target="_blank" rel="noopener">psy.ritsumei.ac.jp (PDF)</a></li>
+      <li id="src-pazhoohi">Pazhoohi et al. 2023, <i>Archives of Sexual Behavior</i>. Shoulder-to-hip ratio. <a href="https://repositorium.sdum.uminho.pt/handle/1822/90971" target="_blank" rel="noopener">repositorium.sdum.uminho.pt</a></li>
+      <li id="src-sell">Sell et al. 2017, <i>Proc Royal Society B</i>. Upper-body strength and attractiveness. <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC5745404" target="_blank" rel="noopener">pmc.ncbi.nlm.nih.gov/articles/PMC5745404</a></li>
+      <li id="src-dejager">de Jager et al. 2018, <i>Frontiers in Psychology</i>. Face fat vs body fat. <a href="https://www.frontiersin.org/journals/psychology/articles/10.3389/fpsyg.2018.02562/full" target="_blank" rel="noopener">frontiersin.org</a></li>
+      <li id="src-rerule">Re &amp; Rule 2016, <i>Social Psych &amp; Personality Science</i> (read via a news write-up). When face weight change is noticed. <a href="https://www.utoronto.ca/news/losing-weight-can-make-you-more-attractive-experts-say-%E2%80%93-theres-catch" target="_blank" rel="noopener">utoronto.ca</a></li>
+      <li id="src-ramirez">Ramírez-Campillo et al. 2013, <i>J Strength &amp; Conditioning Research</i>. Spot reduction. <a href="https://observatorio-investigacion.unavarra.es/documentos/5f8e8e832999527b469fece3" target="_blank" rel="noopener">unavarra.es</a></li>
+      <li id="src-irwin">Irwin et al. 2025, <i>J Exercise and Nutrition</i>. Six consumer body-fat devices vs DEXA. <a href="https://www.journalofexerciseandnutrition.com/index.php/JEN/article/view/206" target="_blank" rel="noopener">journalofexerciseandnutrition.com</a></li>
+      <li id="src-alam">Alam et al. 2018, <i>JAMA Dermatology</i>. Facial exercise. <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC5885810" target="_blank" rel="noopener">pmc.ncbi.nlm.nih.gov/articles/PMC5885810</a></li>
+      <li id="src-jung">Jung et al. 2024, <i>J Oral Rehabilitation</i>. Gum-chewing training trial. <a href="https://www.citedrive.com/en/discovery/effects-of-gum-chewing-training-on-occlusal-force-masseter-muscle-thickness-and-mandibular-shape-a-randomised-controlled-clinical-trial/" target="_blank" rel="noopener">citedrive.com</a></li>
+      <li id="src-korean">Korean costume research paper, 1998. Hairstyle and perceived face shape. <a href="https://koreascience.kr/article/JAKO199811920815335.pdf" target="_blank" rel="noopener">koreascience.kr (PDF)</a></li>
+      <li id="src-hair">StatPearls, "Anatomy, Hair" (read as a summary). Hair growth rate. <a href="https://www.ncbi.nlm.nih.gov/books/NBK513312/" target="_blank" rel="noopener">ncbi.nlm.nih.gov/books/NBK513312</a></li>
+      <li id="src-sundelin">Sundelin et al. 2013, <i>Sleep</i>. Sleep loss and how the face looks. <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC3738045/" target="_blank" rel="noopener">pmc.ncbi.nlm.nih.gov/articles/PMC3738045</a></li>
+      <li id="src-holding">Holding et al. 2019, <i>J Sleep Research</i>. Sleep loss and appearance (181 people). <a href="https://research-portal.st-andrews.ac.uk/en/publications/the-effect-of-sleep-deprivation-on-objective-and-subjective-measu/" target="_blank" rel="noopener">st-andrews.ac.uk</a></li>
+      <li id="src-murphy">Murphy &amp; Koehler 2022, <i>Scand J Med Sci Sports</i>. Calorie deficit and lean-mass gains. <a href="https://pubmed.ncbi.nlm.nih.gov/34623696/" target="_blank" rel="noopener">pubmed.ncbi.nlm.nih.gov/34623696</a></li>
+      <li id="src-wewege">Wewege et al. 2022, <i>Sports Medicine</i>. Lifting and body fat (54 trials). <a href="https://pubmed.ncbi.nlm.nih.gov/34536199/" target="_blank" rel="noopener">pubmed.ncbi.nlm.nih.gov/34536199</a></li>
+      <li id="src-iraki">Iraki et al. 2019, <i>Sports</i>. Calorie surplus for gaining muscle. <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC6680710/" target="_blank" rel="noopener">pmc.ncbi.nlm.nih.gov/articles/PMC6680710</a></li>
+      <li id="src-morton">Morton et al. 2018, <i>British J Sports Medicine</i>. Protein and muscle gain (49 trials). <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC5867436/" target="_blank" rel="noopener">pmc.ncbi.nlm.nih.gov/articles/PMC5867436</a></li>
+      <li id="src-nedeltcheva">Nedeltcheva et al. 2010, <i>Annals of Internal Medicine</i>. Sleep during a diet. <a href="https://pubmed.ncbi.nlm.nih.gov/20921542/" target="_blank" rel="noopener">pubmed.ncbi.nlm.nih.gov/20921542</a></li>
+      <li id="src-delpino">Delpino et al. 2022, <i>Nutrition</i>. Creatine and lean mass (35 trials). <a href="https://doi.org/10.1016/j.nut.2022.111791" target="_blank" rel="noopener">doi.org/10.1016/j.nut.2022.111791</a></li>
+      <li id="src-kreider">Kreider et al. 2017, <i>JISSN</i> creatine position stand (industry-funded grant), and Lak et al. 2025, <i>JISSN</i> hair trial. <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC5469049/" target="_blank" rel="noopener">PMC5469049</a> · <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC12020143/" target="_blank" rel="noopener">PMC12020143</a></li>
+    </ol>
+  </section>
+</template>
+
+<template id="protein-notes">
+  <section class="panel">
+    <h3>Where the numbers come from</h3>
+    <p class="small muted">Quick-add amounts are from USDA FoodData Central, rounded, or from the brand's label for shakes, whey and jerky. Foods that vary a lot by brand (tofu, jerky, deli turkey, whey) use a typical label value, so check yours. The goal of 0.7–1 g per pound comes from a review of 49 trials in which muscle gains stopped improving around 0.7 g/lb.<sup><a class="cite" href="#src-morton"></a></sup></p>
+    <p class="small muted">Scanned products come from <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener">Open Food Facts</a>, a free volunteer food database (data under the Open Database License). Some entries are missing or wrong. When that happens, type the label's number once and the app remembers it.</p>
+  </section>
+</template>
+<script src="app.js"></script>
+</body>
+</html>

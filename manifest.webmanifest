@@ -1,0 +1,16 @@
+{
+  "name": "Rotation: 40-minute lifting loop",
+  "short_name": "Rotation",
+  "description": "Four short workouts in a loop, a set logger with rest alerts, a protein counter with barcode scanning, and progress tracking.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#141A1F",
+  "theme_color": "#141A1F",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
