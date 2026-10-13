@@ -1,7 +1,7 @@
 // Offline support. The app's own files are served from the cache and refreshed in the
 // background, so the app opens instantly with no signal and picks up updates on the next launch.
 // Bump VERSION whenever the list of app files changes.
-const VERSION = "rotation-v1";
+const VERSION = "rotation-v2";
 const RUNTIME = "rotation-runtime";
 const SHELL = [
   "./", "./index.html", "./styles.css", "./app.js", "./manifest.webmanifest",
@@ -29,7 +29,11 @@ self.addEventListener("fetch", e => {
   if (url.hostname.endsWith("openfoodfacts.org") || url.hostname === "api.nal.usda.gov") return;
 
   if (url.origin === self.location.origin) {
-    const key = req.mode === "navigate" ? "./index.html" : req;
+    // The app is one page: opening its folder or index.html both get the cached index.html.
+    const scope = new URL(self.registration.scope).pathname;
+    const isApp = req.mode === "navigate" && (url.pathname === scope || url.pathname === scope + "index.html");
+    if (req.mode === "navigate" && !isApp) return;
+    const key = isApp ? "./index.html" : req;
     e.respondWith(caches.open(VERSION).then(async cache => {
       const hit = await cache.match(key, { ignoreSearch: true });
       const refresh = fetch(req, { cache: "no-cache" })

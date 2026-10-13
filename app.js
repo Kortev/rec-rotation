@@ -5,6 +5,7 @@
 // The program
 // =====================================================================
 const ROT = ["U1","L1","U2","L2"];
+const WEEK_GOAL = 4;
 const LATERAL = {id:"lateral",name:"Dumbbell lateral raise",sets:3,lo:12,hi:20,rest:45,
   cue:"Raise the weights out to your sides, leading with your elbows, and stop at shoulder height. Go light and slow. This is the move that makes your shoulders wider.",
   swaps:["Cable lateral raise (one arm)","Lateral raise machine"]};
@@ -74,7 +75,7 @@ const PLAN = {
   ]}
 };
 
-// Quick-add foods. Protein per portion, rounded, from USDA FoodData Central (FDC id) or the brand label.
+// Common foods. Protein per portion, rounded, from USDA FoodData Central (FDC id) or the brand label.
 const FOODS = [
   {name:"Chicken breast", portion:"4 oz cooked", g:35},   // FDC 171477
   {name:"Whey protein", portion:"1 scoop", g:24},          // ON Gold Standard label (FDC 2463685); most brands 20–25
@@ -99,13 +100,17 @@ const FOODS = [
 // Storage: everything lives on this phone, in localStorage
 // =====================================================================
 const KEY = "rr.v1", DKEY = "rr.draft", UIKEY = "rr.ui";
-function blank(){ return {v:1, sessions:[], checkins:[], protein:{}, foods:[], settings:{bodyweight:null, sound:true}, lastBackup:null}; }
+function blank(){ return {v:1, sessions:[], checkins:[], protein:{}, foods:[], myFoods:[], usage:{}, settings:{bodyweight:null, sound:true}, lastBackup:null}; }
 function lsGet(k){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; }catch(e){ return null; } }
 function lsSet(k,v){ try{ if(v==null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); return true; }catch(e){ return false; } }
 let DB = (function(){
   const d = lsGet(KEY), b = blank();
   if(!d || d.v!==1) return b;
-  return Object.assign(b, d, {settings:Object.assign(b.settings, d.settings||{})});
+  const out = Object.assign(b, d, {settings:Object.assign(b.settings, d.settings||{})});
+  ["sessions","checkins","foods","myFoods"].forEach(k=>{ if(!Array.isArray(out[k])) out[k] = []; });
+  if(!out.usage || typeof out.usage!=="object") out.usage = {};
+  if(!out.protein || typeof out.protein!=="object") out.protein = {};
+  return out;
 })();
 let askedPersist = false;
 function persist(){
@@ -115,14 +120,16 @@ function persist(){
   if(!askedPersist){ askedPersist = true; try{ navigator.storage && navigator.storage.persist && navigator.storage.persist().catch(()=>{}); }catch(e){} }
   return true;
 }
-const UI = Object.assign({tab:"today", hideInstall:false}, lsGet(UIKEY)||{});
+const UI = Object.assign({tab:"train", skipInstall:false}, lsGet(UIKEY)||{});
+if(!["train","protein","progress"].includes(UI.tab)) UI.tab = "train";
 function saveUI(){ lsSet(UIKEY, UI); }
 
+// A workout in progress survives the app being closed.
 let draft = lsGet(DKEY);
 if(draft && (!draft.startedAt || Date.now() - draft.startedAt > 5*3600e3 || !PLAN[draft.workout])){ draft = null; lsSet(DKEY,null); }
 function saveDraft(){ lsSet(DKEY, draft); }
 
-const S = {chosen:null, confirm:null, error:null, dirty:false, sheet:null, edit:null};
+const S = {chosen:null, sheet:null, edit:null, confirm:null, error:null, finish:null, typing:null, showAll:false, guideTab:"plan"};
 
 // =====================================================================
 // Helpers
@@ -132,29 +139,70 @@ const esc = s => String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"
 const fmtDate = ms => new Date(ms).toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"});
 const mmss = s => { s = Math.max(0, Math.round(s)); return Math.floor(s/60)+":"+String(s%60).padStart(2,"0"); };
 const dayKey = (d=new Date()) => { const x = new Date(d); return x.getFullYear()+"-"+String(x.getMonth()+1).padStart(2,"0")+"-"+String(x.getDate()).padStart(2,"0"); };
-const num = v => { const n = parseFloat(String(v==null?"":v).replace(",",".")); return isFinite(n) ? n : null; };
+const num = v => { if(v==null) return null; const n = parseFloat(String(v).replace(",",".")); return isFinite(n) ? n : null; };
 const r1 = n => Math.round(n*10)/10;
+const plural = (n, w) => n+" "+w+(n===1?"":"s");
 const isStandalone = () => window.navigator.standalone === true || (window.matchMedia && matchMedia("(display-mode: standalone)").matches);
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform==="MacIntel" && navigator.maxTouchPoints>1);
+const short = n => { const x = n.replace(/^(Machine|Dumbbell|Cable|Seated|Lying|Standing|Smith machine) /,"").replace(/\s*\(.*\)$/,""); return x.charAt(0).toUpperCase()+x.slice(1); };
 
 const CITE = {};
 $("#why-src").content.querySelectorAll("#sources > li").forEach((li,i)=>{ CITE[li.id] = i+1; });
+function numberCites(root){
+  root.querySelectorAll("a.cite").forEach(a=>{ const n = CITE[a.getAttribute("href").slice(1)] || "?"; a.textContent = n; a.setAttribute("aria-label","Source "+n); });
+}
 
 let toastT = null;
-function toast(msg){
+function toast(msg, action){
   let t = $(".toast"); if(!t){ t = document.createElement("div"); t.className = "toast"; t.setAttribute("role","status"); document.body.appendChild(t); }
-  t.textContent = msg; clearTimeout(toastT); toastT = setTimeout(()=>t.remove(), 3000);
+  t.innerHTML = "<span></span>"; t.firstChild.textContent = msg;
+  if(action){ const b = document.createElement("button"); b.textContent = action.label; b.onclick = ()=>{ t.remove(); action.fn(); }; t.appendChild(b); }
+  clearTimeout(toastT); toastT = setTimeout(()=>t.remove(), action ? 5000 : 3000);
 }
 
 // =====================================================================
-// Workout logic
+// Workout engine
 // =====================================================================
-function nextWorkout(){
-  const last = DB.sessions[0];
-  if(!last) return "U1";
-  return ROT[(ROT.indexOf(last.workout)+1) % ROT.length] || "U1";
+function itemOf(W, id){ return W.items.find(x=>x.id===id); }
+// Exercises tagged A1/A2 (same letter, a digit) are a pair: their sets alternate.
+function groupsOf(W){
+  const groups = [];
+  for(const it of W.items.filter(x=>!x.bonus)){
+    const m = /^([A-Z])(\d)$/.exec(it.tag);
+    const g = m && groups.find(x=>x.letter===m[1]);
+    if(g) g.items.push(it); else groups.push({letter: m ? m[1] : it.tag, items:[it]});
+  }
+  return groups;
 }
-function currentKey(){ return draft ? draft.workout : (S.chosen || nextWorkout()); }
+function partnerOf(W, id){ const g = groupsOf(W).find(x=>x.items.some(i=>i.id===id)); return g && g.items.length>1 ? g.items.find(i=>i.id!==id) : null; }
+function seqOf(W, withBonus){
+  const seq = [];
+  for(const g of groupsOf(W)){
+    const max = Math.max(...g.items.map(x=>x.sets));
+    for(let i=0;i<max;i++) for(const it of g.items) if(i<it.sets) seq.push({ex:it.id, i});
+  }
+  if(withBonus) W.items.filter(x=>x.bonus).forEach(it=>{ for(let i=0;i<it.sets;i++) seq.push({ex:it.id, i}); });
+  return seq;
+}
+function entry(item){
+  if(!draft.entries[item.id]) draft.entries[item.id] = {variant:item.name, sets:Array.from({length:item.sets},()=>({w:null, r:null, done:false}))};
+  return draft.entries[item.id];
+}
+function normalizeDraft(){
+  draft.entries = draft.entries || {};
+  Object.values(draft.entries).forEach(en=>{ en.sets = (en.sets||[]).map(s=>({w:num(s.w), r:s.r===""||s.r==null?null:parseInt(s.r,10), done:!!s.done})); });
+  draft.skipped = draft.skipped || {};
+  if(draft.cur===undefined){ draft.restEnd = null; draft.cur = nextCur(); }
+}
+function nextCur(){
+  const W = PLAN[draft.workout];
+  for(const st of seqOf(W, draft.bonus===true)){
+    if(draft.skipped[st.ex]) continue;
+    const en = draft.entries[st.ex];
+    if(!en || !en.sets[st.i] || !en.sets[st.i].done) return st;
+  }
+  return null;
+}
 function lastFor(exId, variant){
   for(const s of DB.sessions){
     const e = (s.entries||[]).find(x=>x.ex===exId && x.variant===variant);
@@ -162,41 +210,117 @@ function lastFor(exId, variant){
   }
   return null;
 }
-function hintFor(item, last){
-  if(!last) return {cls:"new", text:"First time: pick a weight you can lift "+item.lo+"–"+item.hi+" times with 1–2 reps left in the tank."};
-  const top = last.sets.length >= item.sets && last.sets.slice(0,item.sets).every(s=>s.r >= item.hi);
-  const w = last.sets[0].w;
-  if(top) return {cls:"up", text:"You hit "+item.hi+" on every set last time. Go up one pin (or the next dumbbell) today.", add:true, w};
-  return {cls:"same", text:"Stay at "+w+" lb and beat at least one rep count from last time.", w};
-}
-function prefillW(item, variant){
-  const h = hintFor(item, lastFor(item.id, variant));
-  return (h.w!=null && !h.add) ? String(h.w) : "";
-}
-function ensureDraft(){
-  if(draft) return draft;
-  draft = {workout:currentKey(), startedAt:Date.now(), restEnd:null, entries:{}};
-  saveDraft(); startTicker(); requestWake();
-  return draft;
-}
-function entryFor(item){
-  const d = ensureDraft();
-  if(!d.entries[item.id]){
-    const w = prefillW(item, item.name);
-    d.entries[item.id] = {variant:item.name, sets:Array.from({length:item.sets},()=>({w, r:"", done:false}))};
+function allTop(item, sets){ return sets.length >= item.sets && sets.slice(0,item.sets).every(s=>s.r >= item.hi); }
+// What to show (and log on one tap) for a set: what you typed, else last time's numbers, else this session's previous set.
+function vals(item, i){
+  const en = entry(item), s = en.sets[i];
+  const last = lastFor(item.id, en.variant);
+  let w = s.w, r = s.r, note = "";
+  if(last){
+    const ls = last.sets[i] || last.sets[last.sets.length-1];
+    if(allTop(item, last.sets)){
+      if(w==null) w = ls.w + 5;
+      if(r==null) r = item.lo;
+      note = "You hit "+item.hi+" on every set last time. Up 5 lb today.";
+    } else {
+      if(w==null) w = ls.w;
+      if(r==null) r = ls.r;
+      note = "Last time "+ls.w+" × "+ls.r+" on this set. Beat it.";
+    }
+  } else {
+    const prev = en.sets.slice(0,i).reverse().find(x=>x.done);
+    if(prev){ if(w==null) w = prev.w; if(r==null) r = prev.r; note = "Aim for "+item.lo+"–"+item.hi+" reps with 1–2 left in the tank."; }
+    else { if(r==null) r = item.lo; note = "First time: pick a weight you can lift "+item.lo+"–"+item.hi+" times with 1–2 reps left in the tank."; }
   }
-  return d.entries[item.id];
+  return {w, r, note};
+}
+function weekStart(){ const d = new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate() - ((d.getDay()+6)%7)); return d.getTime(); }
+function weekCount(){ const ws = weekStart(); return DB.sessions.filter(s=>s.at>=ws).length; }
+function nextWorkout(){
+  const last = DB.sessions[0];
+  if(!last) return "U1";
+  return ROT[(ROT.indexOf(last.workout)+1) % ROT.length] || "U1";
+}
+function topSet(sets){ return sets.reduce((a,b)=> (b.w>a.w || (b.w===a.w && b.r>a.r)) ? b : a); }
+
+function startWorkout(){
+  const key = S.chosen || nextWorkout();
+  draft = {workout:key, startedAt:Date.now(), restEnd:null, restFor:0, entries:{}, skipped:{}, last:null};
+  draft.cur = nextCur();
+  saveDraft(); audio(); requestWake(); startTicker();
+  S.chosen = null; S.finish = null;
+}
+function curItem(){ return draft && draft.cur ? itemOf(PLAN[draft.workout], draft.cur.ex) : null; }
+function logSet(){
+  const item = curItem(); if(!item) return;
+  const i = draft.cur.i, v = vals(item, i);
+  if(v.w==null){ S.typing = "w"; render(); focusTyping(); toast("Enter the weight first (0 for bodyweight)."); return; }
+  const s = entry(item).sets[i];
+  s.w = v.w; s.r = v.r; s.done = true;
+  draft.last = {ex:item.id, i};
+  draft.cur = nextCur();
+  if(draft.cur){ draft.restEnd = Date.now() + item.rest*1000; draft.restFor = item.rest; scheduleBeep(item.rest); }
+  else { draft.restEnd = null; cancelBeep(); }
+  requestWake(); saveDraft(); render();
+}
+function undoLast(){
+  if(!draft || !draft.last) return;
+  const s = draft.entries[draft.last.ex].sets[draft.last.i];
+  s.done = false;
+  draft.cur = draft.last; draft.last = null; draft.restEnd = null; cancelBeep();
+  saveDraft(); render();
+}
+function adjust(k, d){
+  const item = curItem(); if(!item) return;
+  const s = entry(item).sets[draft.cur.i], v = vals(item, draft.cur.i);
+  if(k==="w"){ if(v.w==null){ S.typing = "w"; render(); focusTyping(); return; } s.w = Math.max(0, r1(v.w + d)); s.r = v.r; }
+  else { s.r = Math.max(0, (v.r||0) + d); s.w = v.w; }
+  saveDraft(); render();
 }
 function endSession(){
-  draft = null; lsSet(DKEY,null); S.chosen = null; S.confirm = null;
+  draft = null; lsSet(DKEY,null); S.confirm = null; S.typing = null;
   stopTicker(); cancelBeep();
   try{ wake && wake.release(); }catch(e){}
+}
+function finishWorkout(){
+  if(!draft) return;
+  const W = PLAN[draft.workout], entries = [];
+  for(const item of W.items){
+    const en = draft.entries[item.id]; if(!en) continue;
+    const sets = en.sets.filter(s=>s.done).map(s=>({w:num(s.w)||0, r:s.r||0})).filter(s=>s.r>0);
+    if(sets.length) entries.push({ex:item.id, variant:en.variant, sets});
+  }
+  if(!entries.length){ endSession(); render(); toast("Nothing logged, so nothing saved."); return; }
+  const at = Date.now();
+  const doc = {id:"s-"+at, at, workout:draft.workout, minutes:Math.max(1, Math.round((at-draft.startedAt)/60000)), entries};
+  const summary = summarize(doc);
+  DB.sessions.push(doc);
+  if(!persist()){ DB.sessions = DB.sessions.filter(x=>x!==doc); toast("Couldn't save on this phone. Your sets are still here."); return; }
+  endSession();
+  S.finish = summary;
+  window.scrollTo(0,0); render();
+}
+function summarize(doc){
+  const W = PLAN[doc.workout], bests = [], heavier = [], starts = [];
+  for(const e of doc.entries){
+    let prev = null;
+    for(const s of DB.sessions){ const pe = (s.entries||[]).find(x=>x.ex===e.ex && x.variant===e.variant); if(pe && pe.sets.length){ const t = topSet(pe.sets); if(!prev || t.w>prev.w || (t.w===prev.w && t.r>prev.r)) prev = t; } }
+    const top = topSet(e.sets);
+    if(!prev) starts.push({name:e.variant, top});
+    else if(top.w>prev.w) bests.push({name:e.variant, top, gain:"+"+r1(top.w-prev.w)+" lb"});
+    else if(top.w===prev.w && top.r>prev.r) bests.push({name:e.variant, top, gain:"+"+plural(top.r-prev.r,"rep")});
+    const item = itemOf(W, e.ex);
+    if(item && allTop(item, e.sets)) heavier.push(e.variant);
+  }
+  const sets = doc.entries.reduce((a,e)=>a+e.sets.length,0);
+  return {workout:doc.workout, minutes:doc.minutes, sets, bests, heavier, starts};
 }
 
 // =====================================================================
 // Rest alert: a beep scheduled ahead on Web Audio, so it fires without another tap.
 // "transient" mixes with the user's music; like all iPhone web audio it follows the silent switch.
 // =====================================================================
+const AUDIO_SESSION_TYPE = "transient";
 let actx = null, beeps = [];
 function audio(){
   try{
@@ -206,7 +330,6 @@ function audio(){
     return actx;
   }catch(e){ return null; }
 }
-const AUDIO_SESSION_TYPE = "transient";
 function scheduleBeep(secs){
   cancelBeep();
   if(!DB.settings.sound) return;
@@ -225,122 +348,233 @@ function scheduleBeep(secs){
 }
 function cancelBeep(){ beeps.forEach(o=>{ try{ o.stop(); }catch(e){} }); beeps = []; }
 
+let wake = null;
+async function requestWake(){ try{ if(navigator.wakeLock && !wake && document.visibilityState==="visible"){ wake = await navigator.wakeLock.request("screen"); wake.addEventListener("release",()=>{ wake = null; }); } }catch(e){ wake = null; } }
+
 // =====================================================================
 // Rendering
 // =====================================================================
-const TITLES = {today:"Today", protein:"Protein", progress:"Progress", plan:"The plan", why:"Why it works"};
+const SHARE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 8l5-5 5 5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>';
+function showInstall(){ return (isIOS && !isStandalone() && !UI.skipInstall) || /[?&]install\b/.test(location.search); }
 function render(){
-  document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-selected", String(b.dataset.tab===UI.tab)));
-  $("#title").textContent = TITLES[UI.tab];
   const v = $("#view");
-  if(UI.tab==="today") v.innerHTML = viewToday();
+  const install = showInstall();
+  document.body.classList.toggle("notabs", install);
+  document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-selected", String(b.dataset.tab===UI.tab)));
+  if(install) v.innerHTML = viewInstall();
   else if(UI.tab==="protein") v.innerHTML = viewProtein();
   else if(UI.tab==="progress") v.innerHTML = viewProgress();
-  else if(UI.tab==="plan") v.innerHTML = viewPlan();
-  else v.innerHTML = $("#why-src").innerHTML;
+  else if(S.finish) v.innerHTML = viewFinish();
+  else if(draft) v.innerHTML = viewSession();
+  else v.innerHTML = viewHome();
   numberCites(v);
-  $("#subline").textContent = subline();
-  document.body.classList.toggle("running", !!draft);
-  $("#bar").hidden = !draft;
   tick();
-  S.dirty = false;
-}
-function subline(){
-  if(UI.tab==="protein"){ const t = target(); return t ? ("Goal: "+t.min+"–"+t.max+" g a day") : "Set your bodyweight to get a daily goal."; }
-  if(draft) return "In progress: "+PLAN[draft.workout].name;
-  return "Next up: "+PLAN[nextWorkout()].name+" · about "+PLAN[nextWorkout()].mins+" min";
-}
-function numberCites(root){
-  root.querySelectorAll("a.cite").forEach(a=>{ const n = CITE[a.getAttribute("href").slice(1)] || "?"; a.textContent = n; a.setAttribute("aria-label","Source "+n); });
 }
 function renderSafe(){
   const a = document.activeElement;
-  if(a && $("#view").contains(a) && (a.tagName==="INPUT" || a.tagName==="SELECT")){ S.dirty = true; return; }
+  if(a && $("#view").contains(a) && (a.tagName==="INPUT" || a.tagName==="TEXTAREA" || a.tagName==="SELECT")) return;
   render();
 }
-
-function viewToday(){
-  const key = currentKey(), W = PLAN[key], nxt = nextWorkout();
-  let h = "";
-  if(!isStandalone() && !UI.hideInstall){
-    h += '<div class="install"><b>Install it on your phone</b><span>'+(isIOS
-      ? "In Safari, tap the Share button, then <b>Add to Home Screen</b>. Then always open it from the icon: the installed app keeps its own log, separate from Safari."
-      : "Open your browser menu and choose <b>Install app</b> or <b>Add to Home screen</b>.")+'</span><button class="btn quiet" style="color:inherit;justify-self:start;padding:0" data-act="hide-install">Got it</button></div>';
-  }
-  h += '<section class="stack"><div class="label">Pick today\'s workout</div><div class="chooser" role="group" aria-label="Workout">';
-  for(const k of ROT) h += '<button data-pick="'+k+'" aria-pressed="'+(k===key)+'"'+(draft?" disabled":"")+'><b>'+k+'</b><span>'+(k===nxt?"next up":PLAN[k].name)+'</span></button>';
-  h += '</div>';
-  if(draft) h += '<p class="small muted">Finish or discard this session to switch workouts.</p>';
-  else if(key!==nxt) h += '<p class="small muted">The loop says '+PLAN[nxt].name+' is next. Switching is fine if a machine you need is packed.</p>';
-  h += '</section>';
-
-  h += '<section class="panel"><div class="row spread"><h2>'+esc(W.name)+'</h2><span class="dose">≈'+W.mins+' min</span></div><p class="muted">'+esc(W.focus)+'. Paired moves (A1/A2) alternate with about 60 s rest after each. If the rec is packed, do them one after the other instead of holding two machines.</p>';
-  if(!draft) h += '<button class="btn wide" data-act="start">Start the 40-minute clock</button>';
-  h += '</section>';
-
-  let bonusShown = false;
-  for(const item of W.items){
-    if(item.bonus && !bonusShown){ h += '<div class="divider">Only if you have time left</div>'; bonusShown = true; }
-    const e = draft && draft.entries[item.id];
-    const variant = e ? e.variant : item.name;
-    const last = lastFor(item.id, variant);
-    const hint = hintFor(item, last);
-    h += '<article class="ex'+(item.bonus?" bonus":"")+'">';
-    h += '<div class="ex-head"><div class="tag">'+esc(item.tag)+'</div><div class="ex-title"><h3>'+esc(variant)+'</h3><div class="dose">'+item.sets+' sets × '+item.lo+'–'+item.hi+' reps · rest '+item.rest+' s</div></div></div>';
-    h += '<p class="hint '+hint.cls+'">'+esc(hint.text)+'</p>';
-    if(last) h += '<p class="last">Last time ('+fmtDate(last.at)+'): '+last.sets.map(s=>esc(s.w)+'×'+esc(s.r)).join(', ')+'</p>';
-    h += '<p class="cue">'+esc(item.cue)+'</p>';
-    h += '<div class="swap"><label class="small muted" for="sw-'+item.id+'">Machine taken? Swap to:</label><select id="sw-'+item.id+'" data-swap="'+item.id+'">';
-    for(const n of [item.name].concat(item.swaps)) h += '<option'+(n===variant?" selected":"")+'>'+esc(n)+'</option>';
-    h += '</select></div><div class="sets">';
-    for(let i=0;i<item.sets;i++){
-      const s = e ? e.sets[i] : {w:"",r:"",done:false};
-      const pw = hint.w!=null ? (hint.add ? "> "+hint.w : String(hint.w)) : "lb";
-      const wv = s.w!=="" ? s.w : (hint.w!=null && !hint.add ? hint.w : "");
-      const lr = last && last.sets[i] ? String(last.sets[i].r) : (item.lo+"–"+item.hi);
-      h += '<div class="set'+(s.done?" is-done":"")+'"><span class="n">Set '+(i+1)+'</span>'+
-        '<label class="field"><input id="w-'+item.id+'-'+i+'" inputmode="decimal" aria-label="Set '+(i+1)+' weight in pounds" data-w="'+item.id+'" data-i="'+i+'" value="'+esc(wv)+'" placeholder="'+esc(pw)+'"><i>lb</i></label>'+
-        '<label class="field"><input id="r-'+item.id+'-'+i+'" inputmode="numeric" aria-label="Set '+(i+1)+' reps" data-r="'+item.id+'" data-i="'+i+'" value="'+esc(s.r)+'" placeholder="'+esc(lr)+'"><i>reps</i></label>'+
-        '<button class="done" data-done="'+item.id+'" data-i="'+i+'" aria-pressed="'+(!!s.done)+'" aria-label="Mark set '+(i+1)+' done and start rest">✓</button></div>';
-    }
-    h += '</div></article>';
-  }
-  if(S.error) h += '<p class="note err">'+esc(S.error)+'</p>';
-  if(draft){
-    h += '<section class="stack"><button class="btn wide" data-act="save">Finish and save</button>';
-    if(S.confirm==="discard") h += '<div class="confirm"><b>Discard this session?</b><span class="small">Nothing you typed will be saved.</span><div class="row"><button class="btn" data-act="discard-yes">Discard</button><button class="btn ghost" data-act="cancel">Keep going</button></div></div>';
-    else h += '<button class="btn quiet" data-act="discard">Discard session</button>';
-    h += '</section>';
-  }
-  return h;
+function weekDots(n){
+  let h = '<div class="week">';
+  for(let i=0;i<WEEK_GOAL;i++) h += '<span class="dot'+(i<n?" on":"")+'"></span>';
+  return h + '<span>'+n+' of '+WEEK_GOAL+' this week</span></div>';
 }
 
-function viewPlan(){
-  let h = '<section class="panel"><h2>How it works</h2><ul class="rules">'+
-    '<li><b>Go 3–4 times a week and do the next workout in the loop:</b> U1 → L1 → U2 → L2 → back to U1. No fixed days, so a missed day never breaks the plan.</li>'+
-    '<li><b>About 35 minutes, hard cap at 40.</b> When the clock hits 40, save and leave. That counts as a full workout. The bonus move is the only thing you\'re allowed to skip.</li>'+
-    '<li><b>Effort:</b> end each set when you have 0–2 more reps left in you. Going all the way to failure adds almost nothing and leaves you sorer for longer.</li>'+
-    '<li><b>Heavy stuff first, small stuff last.</b> You get your best effort on the moves that build the most, and ending on easier sets makes you remember the workout as less miserable, which makes you more likely to come back.</li>'+
-    '<li><b>Getting stronger:</b> once you hit the top of the rep range on every set, go up one pin (or the next dumbbell) next time. The Today tab tells you when.</li>'+
-    '<li><b>Warm up</b> with one or two light sets of your first exercise. That\'s enough.</li>'+
-    '<li><b>Rest alert:</b> tap ✓ after a set and the app beeps when rest is over. Keep the app open; the screen stays on during a session. The beep plays over your music but follows the ring/silent switch, so flip it to ring at the gym. Turn the beep off in Progress → Settings.</li>'+
-    '</ul></section>';
-  h += '<section class="panel"><h2>When the rec is packed</h2><ul class="rules">'+
-    '<li>Every exercise has swaps in the drop-down. If a machine is taken, use the first free swap. Don\'t wait more than about 2 minutes.</li>'+
-    '<li>Paired moves save time but mean using two stations. When it\'s busy, do them one after the other instead.</li>'+
-    '<li>Asking "how many sets do you have left?" or "mind if I work in?" is normal gym etiquette.</li>'+
-    '<li>Most college recs are busiest from late afternoon into the evening. Many post a live head count online. Early mornings and early afternoons are usually quieter.</li>'+
-    '</ul></section>';
-  h += '<section class="panel"><h2>The four workouts</h2>';
-  for(const k of ROT){
-    const W = PLAN[k];
-    h += '<div class="wk"><div class="row spread" style="margin-top:6px"><h3>'+k+' · '+esc(W.name)+'</h3><span class="dose">≈'+W.mins+' min</span></div>';
-    for(const it of W.items) h += '<div class="wk-row"><span class="t">'+esc(it.bonus?"+":it.tag)+'</span><span>'+esc(it.name)+(it.bonus?' <span class="muted small">(bonus)</span>':'')+'</span><span class="d">'+it.sets+'×'+it.lo+'–'+it.hi+'</span></div>';
+function viewInstall(){
+  return '<section style="display:grid;gap:22px;padding-top:6vh">'+
+    '<div style="display:grid;gap:10px"><div class="hero-num">40</div><h1>Lift for 40 minutes.<br>See it working.</h1><p class="sub">Four short workouts in a loop. It tells you what to lift, times your rest, and tracks your protein.</p></div>'+
+    '<div class="install-steps">'+
+      '<div class="stp"><em>1</em><span>Tap <span class="share">'+SHARE_SVG+'</span> Share in Safari</span></div>'+
+      '<div class="stp"><em>2</em><span>Choose <b>Add to Home Screen</b></span></div>'+
+      '<div class="stp"><em>3</em><span>Open Rotation from your Home Screen</span></div>'+
+    '</div>'+
+    '<p class="small muted">Your log is stored inside the installed app, separate from Safari, so install it before your first workout.</p>'+
+    '<button class="link" data-act="skip-install">Use it in Safari anyway</button>'+
+  '</section>';
+}
+
+function viewHome(){
+  const key = S.chosen || nextWorkout(), W = PLAN[key], nxt = nextWorkout();
+  const first = !DB.sessions.length, doneBefore = DB.sessions.some(s=>s.workout===key);
+  let h = '<section style="display:grid;gap:18px">';
+  h += '<div class="headrow">'+weekDots(weekCount())+'<button class="x" data-act="guide" aria-label="Guide: the plan and the research">?</button></div>';
+  h += '<div><h1>'+esc(W.name)+'</h1><p class="sub">'+(first ? "Your first workout" : (doneBefore ? esc(W.focus) : "First time doing this one"))+' · about '+W.mins+' min</p>';
+  if(key!==nxt) h += '<p class="small muted" style="margin-top:4px">The loop says '+PLAN[nxt].name+' is next.</p>';
+  h += '</div><div class="list">';
+  for(const it of W.items.filter(x=>!x.bonus)){
+    const last = lastFor(it.id, it.name);
+    h += '<div class="li"><span>'+esc(it.name)+'<small>'+plural(it.sets,"set")+' · '+it.lo+'–'+it.hi+' reps</small></span><span class="r">'+(last ? esc(topSet(last.sets).w)+' lb' : 'new')+'</span></div>';
+  }
+  const bonus = W.items.find(x=>x.bonus);
+  h += '</div>';
+  if(bonus) h += '<p class="small muted">Bonus if there\'s time: '+esc(bonus.name)+'</p>';
+  if(first) h += '<div class="nudge">First time on a machine? Start light. The app learns your weights over your first couple of workouts.</div>';
+  h += '<div class="cta"><button class="btn" data-act="start">Start workout</button><button class="link" data-act="pick">Do a different workout</button></div>';
+  return h + '</section>';
+}
+
+function sessionTop(label){
+  return '<div class="headrow"><button class="x" data-act="end" aria-label="End workout">✕</button>'+label+'<span class="clock" id="clk"></span></div><div class="bar40"><span id="b40"></span></div>';
+}
+function viewSession(){
+  const W = PLAN[draft.workout], now = Date.now();
+  if(draft.restEnd && draft.restEnd > now) return viewRest(W);
+  const item = curItem();
+  if(!item) return viewWrap(W);
+  const mainItems = W.items.filter(x=>!x.bonus), idx = mainItems.indexOf(item);
+  const en = entry(item), i = draft.cur.i, v = vals(item, i), partner = partnerOf(W, item.id);
+  const mins = (now - draft.startedAt)/60000;
+  let h = '<section style="display:grid;gap:16px">';
+  h += sessionTop('<button class="chip" data-act="overview">'+esc(short(en.variant))+' · '+(idx>=0 ? (idx+1)+' of '+mainItems.length : 'bonus')+' ▾</button>');
+  if(mins>=40) h += '<div class="warn"><span>40 minutes. That\'s a full workout.</span><button data-act="finish">Finish now</button></div>';
+  else if(mins>=33 && !item.bonus) h += '<div class="warn"><span>About 7 minutes left. Skip the bonus today.</span></div>';
+  h += '<div><h2>'+esc(en.variant)+'</h2>'+(partner ? '<p class="small muted" style="margin-top:2px">Paired with '+esc(short(entry(partner).variant))+'</p>' : '')+'</div>';
+  h += '<div class="setchips">';
+  en.sets.forEach((s,k)=>{
+    const cls = s.done ? "done" : (k===i ? "cur" : "");
+    h += '<button class="'+cls+'" data-act="goset" data-ex="'+item.id+'" data-i="'+k+'">'+(s.done ? esc(s.w)+' × '+esc(s.r) : 'Set '+(k+1))+'</button>';
+  });
+  h += '</div><div class="steppers">';
+  h += '<div class="step"><span class="lab">lb · tap to type</span>'+(S.typing==="w"
+      ? '<input class="val" id="typing" inputmode="decimal" value="'+esc(v.w==null?"":v.w)+'" aria-label="Weight in pounds">'
+      : '<button class="val'+(v.w==null?" empty":"")+'" data-act="type" data-k="w" aria-label="Weight, tap to type">'+(v.w==null ? "tap" : esc(v.w))+'</button>')+
+    '<div class="ctl"><button data-act="adj" data-k="w" data-d="-5" aria-label="5 pounds less">−5</button><button data-act="adj" data-k="w" data-d="5" aria-label="5 pounds more">+5</button></div></div>';
+  h += '<div class="step"><span class="lab">reps</span>'+(S.typing==="r"
+      ? '<input class="val" id="typing" inputmode="numeric" value="'+esc(v.r==null?"":v.r)+'" aria-label="Reps">'
+      : '<button class="val" data-act="type" data-k="r" aria-label="Reps, tap to type">'+esc(v.r==null?"–":v.r)+'</button>')+
+    '<div class="ctl"><button data-act="adj" data-k="r" data-d="-1" aria-label="One rep less">−</button><button data-act="adj" data-k="r" data-d="1" aria-label="One rep more">+</button></div></div>';
+  h += '</div><p class="coach">'+esc(v.note)+'</p>';
+  h += '<div class="cta"><button class="btn" data-act="log">✓  Log set '+(i+1)+' of '+en.sets.length+'</button><div class="minor"><button data-act="howto">How to</button><button data-act="swap">Machine taken?</button><button data-act="skip-ex">Skip</button></div></div>';
+  return h + '</section>';
+}
+function viewRest(W){
+  const nx = curItem(), en = nx && entry(nx), v = nx && vals(nx, draft.cur.i);
+  const lastEn = draft.last && draft.entries[draft.last.ex], ls = lastEn && lastEn.sets[draft.last.i];
+  const paired = draft.last && nx && partnerOf(W, draft.last.ex) && partnerOf(W, draft.last.ex).id===nx.id;
+  let h = '<section style="display:grid;gap:16px">';
+  h += sessionTop('<span class="chip">Resting</span>');
+  if(ls) h += '<div class="undo"><span>Logged <b>'+esc(ls.w)+' × '+esc(ls.r)+'</b></span><button data-act="undo">Undo</button></div>';
+  h += '<div class="ring"><svg viewBox="0 0 100 100"><circle class="track" cx="50" cy="50" r="45"/><circle class="prog" id="ringp" cx="50" cy="50" r="45" stroke-dasharray="282.74" stroke-dashoffset="0"/></svg><div class="t"><b id="ringt"></b></div></div>';
+  if(nx) h += '<div class="card"><small>Up next'+(paired?" · paired":"")+'</small><b style="font-size:17px">'+esc(en.variant)+' · set '+(draft.cur.i+1)+'</b><span class="muted small">'+(v.w!=null ? esc(v.w)+' lb × '+esc(v.r) : 'First time on this one')+'</span></div>';
+  h += '<div class="two"><button class="btn ghost sm" data-act="rest-add">+30 s</button><button class="btn ghost sm" data-act="rest-skip">Skip rest</button></div>';
+  return h + '</section>';
+}
+function viewWrap(W){
+  const bonus = W.items.find(x=>x.bonus), mins = Math.round((Date.now()-draft.startedAt)/60000);
+  const offer = bonus && draft.bonus===undefined && !draft.skipped[bonus.id];
+  let h = '<section style="display:grid;gap:18px">';
+  h += sessionTop('<span class="chip">All sets done</span>');
+  h += '<div><h1>Main work done</h1><p class="sub">'+mins+' minutes</p></div>';
+  if(offer){
+    h += '<div class="card"><small>Bonus · about 4 min</small><b style="font-size:17px">'+esc(bonus.name)+'</b><span class="muted small">'+plural(bonus.sets,"set")+' × '+bonus.lo+'–'+bonus.hi+' reps</span></div>';
+    h += mins>=36 ? '<p class="small muted">You\'re close to 40 minutes. Finishing now is the plan working.</p>' : '';
+    h += '<div class="cta"><button class="btn" data-act="finish">Finish workout</button><button class="btn ghost" data-act="bonus">Do the bonus</button></div>';
+  } else {
+    h += '<div class="cta"><button class="btn" data-act="finish">Finish workout</button></div>';
+  }
+  return h + '</section>';
+}
+function viewFinish(){
+  const f = S.finish, t = target(), total = Math.round(dayTotal(dayKey()));
+  let h = '<section style="display:grid;gap:18px">';
+  h += '<div style="margin-top:8px"><p class="eyebrow">'+f.minutes+' min · '+plural(f.sets,"set")+'</p><h1>'+esc(PLAN[f.workout].name)+' done</h1></div>';
+  h += weekDots(weekCount());
+  if(f.bests.length){
+    h += '<div><p class="sec">New bests</p>';
+    f.bests.forEach(b=>{ h += '<div class="best"><span class="badge">↑</span><span>'+esc(b.name)+'<small>'+esc(b.top.w)+' × '+esc(b.top.r)+'</small></span><span class="up">'+esc(b.gain)+'</span></div>'; });
     h += '</div>';
   }
-  h += '</section>';
-  h += $("#plan-extra").innerHTML;
-  return h;
+  if(f.starts.length){
+    h += '<div><p class="sec">'+(f.bests.length ? "First time" : "Your starting numbers")+'</p>';
+    f.starts.forEach(b=>{ h += '<div class="best"><span class="badge plain">•</span><span>'+esc(b.name)+'</span><span class="num muted">'+esc(b.top.w)+' × '+esc(b.top.r)+'</span></div>'; });
+    h += '</div>';
+  }
+  if(!f.bests.length && !f.starts.length) h += '<p class="muted">Same numbers as last time. Holding steady on a rough day still counts. Beat one rep next time.</p>';
+  if(f.heavier.length) h += '<div class="card"><small>Next time, go heavier on</small><b style="font-size:16px">'+esc(f.heavier.join(", "))+'</b><span class="muted small">You hit the top of the rep range on every set</span></div>';
+  if(t) h += '<button class="nudge" data-tab="protein"><span>Protein today</span><b>'+total+' of '+t.min+' g ›</b></button>';
+  h += '<div class="card"><small>Next time</small><b style="font-size:16px">'+esc(PLAN[nextWorkout()].name)+'</b><span class="muted small">'+esc(PLAN[nextWorkout()].focus)+'</span></div>';
+  h += '<button class="btn" data-act="finish-done">Done</button>';
+  return h + '</section>';
+}
+
+// ---------- protein ----------
+function target(){
+  let bw = num(DB.settings.bodyweight);
+  if(!bw){ const c = DB.checkins.find(x=>x.weight); if(c) bw = c.weight; }
+  if(!bw || bw < 60 || bw > 600) return null;
+  return {bw, min:Math.round(bw*0.7), max:Math.round(bw*1.0)};
+}
+function dayTotal(k){ return (DB.protein[k]||[]).reduce((a,e)=>a+(e.g||0),0); }
+function addProtein(g, label, key){
+  g = r1(g); if(!(g>0)) return;
+  const k = dayKey(), e = {t:Date.now(), g, label:String(label||"").slice(0,80)};
+  (DB.protein[k] = DB.protein[k] || []).push(e);
+  if(key){ const u = DB.usage[key] || {n:0, last:0}; u.n++; u.last = e.t; DB.usage[key] = u; }
+  persist();
+  toast("Added "+Math.round(g)+" g", {label:"Undo", fn:()=>{
+    const list = DB.protein[k] || []; const ix = list.findIndex(x=>x.t===e.t);
+    if(ix>=0) list.splice(ix,1);
+    if(!list.length) delete DB.protein[k];
+    if(key && DB.usage[key]) DB.usage[key].n = Math.max(0, DB.usage[key].n-1);
+    persist(); render();
+  }});
+}
+// Everything you can tap to log: your own foods and plates, scanned products, and common foods.
+function foodRows(){
+  const rows = [];
+  DB.myFoods.forEach(f=>rows.push({key:"my:"+f.id, id:f.id, name:f.name, g:f.g, mine:true, plate:!!(f.items && f.items.length),
+    sub: f.items && f.items.length ? f.items.map(x=>x.name).join(", ")+" · "+plural(f.items.length,"item") : (f.where || "Your food")}));
+  DB.foods.filter(f=>f.pServing!=null).forEach(f=>rows.push({key:"scan:"+f.code, code:f.code, name:f.name||"Scanned item", g:f.pServing, sub:(f.brand ? f.brand+" · " : "")+"scanned"}));
+  FOODS.forEach(f=>rows.push({key:"common:"+f.name, name:f.name, g:f.g, sub:f.portion, common:true}));
+  rows.forEach(r=>{ const u = DB.usage[r.key]; r.n = u ? u.n : 0; r.last = u ? u.last : 0; });
+  return rows;
+}
+function foodRow(r, editable){
+  return '<div class="food" style="grid-template-columns:48px 1fr auto auto"><span class="g">'+Math.round(r.g)+'</span><span>'+esc(r.name)+'<small>'+esc(r.sub)+'</small></span>'+
+    (editable && r.mine ? '<button class="edit" data-act="editfood" data-id="'+esc(r.id)+'">Edit</button>' : '<span></span>')+
+    '<button class="plus" data-log="'+esc(r.key)+'" aria-label="Add '+esc(r.name)+', '+Math.round(r.g)+' grams">+</button></div>';
+}
+function viewProtein(){
+  const t = target(), k = dayKey(), total = Math.round(dayTotal(k)), list = DB.protein[k] || [];
+  let h = '<section style="display:grid;gap:16px">';
+  h += '<div><p class="eyebrow">Protein today</p><div class="headrow" style="align-items:flex-end"><div class="big">'+total+'<small>'+(t ? 'of '+t.min+' g' : 'g')+'</small></div><button class="link" style="text-decoration:none" data-act="todaylog">'+list.length+(list.length===1?" entry":" entries")+' ›</button></div></div>';
+  if(t){
+    const scale = Math.max(t.max, total) * 1.12;
+    h += '<div class="meter" role="img" aria-label="'+total+' of '+t.min+' to '+t.max+' grams"><div class="f" style="width:'+Math.min(100,total/scale*100).toFixed(1)+'%"></div>'+
+      '<div class="tick" style="left:'+(t.min/scale*100).toFixed(1)+'%"><span>'+t.min+'</span></div><div class="tick" style="left:'+(t.max/scale*100).toFixed(1)+'%"><span>'+t.max+'</span></div></div>';
+  } else {
+    h += '<form id="bw-form" class="row" style="flex-wrap:nowrap"><label class="field grow"><input id="bw-in" class="inp" inputmode="decimal" placeholder="Your bodyweight" aria-label="Your bodyweight in pounds"><i>lb</i></label><button class="btn sm" style="width:auto" type="submit">Set goal</button></form><p class="small muted">Your goal is 0.7–1 g of protein per pound of bodyweight.</p>';
+  }
+  h += '<div class="addrow"><button class="btn sm" data-act="addfood">+ Add food</button><button class="btn ghost sm" data-act="scan">Scan</button></div>';
+
+  const rows = foodRows();
+  const yours = rows.filter(r=>r.mine || r.n>0).sort((a,b)=> (b.n-a.n) || (b.last-a.last) || ((b.mine?1:0)-(a.mine?1:0)));
+  if(!S.showAll){
+    const top = yours.slice(0,6);
+    if(top.length){ h += '<div><p class="sec">Your foods</p>'; top.forEach(r=>{ h += foodRow(r); }); h += '</div>'; }
+    else { h += '<div><p class="sec">Common foods</p>'; rows.filter(r=>r.common).slice(0,6).forEach(r=>{ h += foodRow(r); }); h += '<p class="small muted" style="margin-top:6px">Foods you log or save move up here. Add your dining hall favorites with + Add food.</p></div>'; }
+    h += '<div class="row" style="justify-content:center;gap:4px"><button class="link" data-act="showall">Show all foods</button><span class="muted">·</span><button class="link" data-act="plate">Make a plate</button></div>';
+  } else {
+    const mine = rows.filter(r=>r.mine || r.code);
+    h += '<div><p class="sec"><span>Your foods and plates</span><button class="link" style="padding:0" data-act="showall">Done</button></p>';
+    if(mine.length) mine.forEach(r=>{ h += foodRow(r, true); }); else h += '<p class="small muted">None yet. Use + Add food for dining hall items, or Make a plate for meals you repeat.</p>';
+    h += '</div><div><p class="sec">Common foods</p>'; rows.filter(r=>r.common).forEach(r=>{ h += foodRow(r); });
+    h += '<p class="small muted" style="margin-top:6px">Typical amounts. The label on your food beats these numbers.</p></div>';
+    h += '<button class="link" data-act="plate">Make a plate</button>';
+  }
+
+  // last 7 days
+  const days = [];
+  for(let j=6;j>=0;j--){ const d = new Date(); d.setDate(d.getDate()-j); days.push({k:dayKey(d), d}); }
+  const vs = days.map(x=>Math.round(dayTotal(x.k)));
+  const top = Math.max(t ? t.max : 0, ...vs, 1) * 1.1;
+  h += '<div><p class="sec">Last 7 days</p><div class="week7" style="margin-top:8px">';
+  if(t) h += '<div class="goal" style="bottom:'+(18 + t.min/top*90).toFixed(0)+'px" aria-hidden="true"></div>';
+  days.forEach((x,j)=>{ const val = vs[j]; h += '<div class="col"><span class="v">'+(val||"")+'</span><div class="b'+(t && val>=t.min ? " hit" : "")+'" style="height:'+Math.max(val?3:0, val/top*90).toFixed(0)+'px"></div><span class="d">'+x.d.toLocaleDateString(undefined,{weekday:"narrow"})+'</span></div>'; });
+  h += '</div>'+(t ? '<p class="small muted">Red days hit your '+t.min+' g minimum (dashed line).</p>' : '')+'</div>';
+  h += $("#protein-notes").innerHTML;
+  return h + '</section>';
 }
 
 // ---------- progress ----------
@@ -349,9 +583,8 @@ function spark(vals){
   const w=112,hgt=34,p=3,min=Math.min(...vals),max=Math.max(...vals),span=(max-min)||1;
   const pts = vals.map((v,i)=>[p+i*(w-2*p)/(vals.length-1), hgt-p-(v-min)*(hgt-2*p)/span]);
   const L = pts[pts.length-1];
-  return '<svg viewBox="0 0 '+w+' '+hgt+'" aria-hidden="true"><polyline points="'+pts.map(q=>q[0].toFixed(1)+","+q[1].toFixed(1)).join(" ")+'" fill="none" stroke="var(--steel)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/><circle cx="'+L[0].toFixed(1)+'" cy="'+L[1].toFixed(1)+'" r="3" fill="var(--plate)"/></svg>';
+  return '<svg viewBox="0 0 '+w+' '+hgt+'" aria-hidden="true"><polyline points="'+pts.map(q=>q[0].toFixed(1)+","+q[1].toFixed(1)).join(" ")+'" fill="none" stroke="var(--muted)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/><circle cx="'+L[0].toFixed(1)+'" cy="'+L[1].toFixed(1)+'" r="3" fill="var(--accent)"/></svg>';
 }
-function topSet(sets){ return sets.reduce((a,b)=> (b.w>a.w || (b.w===a.w && b.r>a.r)) ? b : a); }
 function seriesByVariant(){
   const series = {};
   for(const s of DB.sessions.slice().reverse()){
@@ -363,137 +596,66 @@ function seriesByVariant(){
   return series;
 }
 function viewProgress(){
-  let h = '';
-  const weekAgo = Date.now() - 7*864e5;
-  const thisWeek = DB.sessions.filter(s=>s.at>=weekAgo).length;
+  let h = '<section style="display:grid;gap:22px"><h1>Progress</h1>';
   const avgMin = DB.sessions.length ? Math.round(DB.sessions.reduce((a,s)=>a+(s.minutes||0),0)/DB.sessions.length) : 0;
-  h += '<section class="stats"><div class="stat"><b class="num">'+thisWeek+'</b><span>workouts in the last 7 days</span></div><div class="stat"><b class="num">'+DB.sessions.length+'</b><span>workouts total</span></div><div class="stat"><b class="num">'+(avgMin||"–")+'</b><span>average minutes</span></div></section>';
+  h += '<div class="stats"><div class="stat"><b class="num">'+weekCount()+'</b><span>this week (goal '+WEEK_GOAL+')</span></div><div class="stat"><b class="num">'+DB.sessions.length+'</b><span>workouts total</span></div><div class="stat"><b class="num">'+(avgMin||"–")+'</b><span>average minutes</span></div></div>';
 
   const series = seriesByVariant(), names = Object.keys(series);
-  h += '<section class="panel"><h2>Strength</h2>';
-  if(!names.length) h += '<p class="muted">No workouts yet. Finish your first one on the Today tab and each exercise shows up here with its trend. Rising numbers are the earliest sign you\'re building muscle, weeks before the mirror shows it.</p>';
+  h += '<div class="panel"><p class="sec">Strength</p>';
+  if(!names.length) h += '<p class="muted">Finish your first workout and each exercise shows up here with its trend. Rising numbers are the earliest sign you\'re building muscle, weeks before the mirror shows it.</p>';
   else {
-    h += '<p class="small muted">Heaviest set each workout, first → latest. Tap one for its full history.</p><div>';
+    h += '<div>';
     for(const n of names){
       const arr = series[n], f = arr[0], l = arr[arr.length-1], diff = r1(l.w - f.w);
       h += '<button class="prog" data-exhist="'+esc(n)+'"><span class="nm">'+esc(n)+'</span>'+spark(arr.slice(-12).map(x=>x.w))+'<span class="ch">'+(arr.length===1 ? esc(f.w)+'×'+esc(f.r)+' · first workout' : esc(f.w)+'×'+esc(f.r)+' → '+esc(l.w)+'×'+esc(l.r)+(diff>0?' <b>+'+diff+' lb</b>':''))+'</span></button>';
     }
     h += '</div>';
   }
-  h += '</section>';
+  h += '</div>';
 
-  h += '<section class="panel"><h2>Monthly check-in</h2>'+$("#checkin-help").innerHTML+
-    '<form id="ci-form" class="stack"><div class="ci">'+
-    '<label for="ci-weight">Bodyweight (lb)<input id="ci-weight" inputmode="decimal"></label>'+
-    '<label for="ci-waist">Waist at navel (in)<input id="ci-waist" inputmode="decimal"></label>'+
-    '<label for="ci-neck">Neck (in)<input id="ci-neck" inputmode="decimal"></label>'+
-    '<label for="ci-shoulders">Shoulders (in)<input id="ci-shoulders" inputmode="decimal"></label>'+
-    '<label for="ci-arm">Upper arm, flexed (in)<input id="ci-arm" inputmode="decimal"></label>'+
-    '</div><button class="btn" type="submit">Save check-in</button></form>';
+  h += '<div class="panel"><p class="sec">History</p>';
+  if(!DB.sessions.length) h += '<p class="muted">Saved workouts appear here. Tap one to fix a number.</p>';
+  else { h += '<div>'; for(const s of DB.sessions.slice(0,60)){ const sets = (s.entries||[]).reduce((a,e)=>a+(e.sets?e.sets.length:0),0); h += '<button class="hist" data-edit="'+esc(s.id)+'"><span><b>'+esc((PLAN[s.workout]||{name:s.workout}).name)+'</b> <span class="muted small">· '+plural(sets,"set")+' · '+(s.minutes||"?")+' min</span></span><span class="chev" aria-hidden="true">›</span><span class="when">'+fmtDate(s.at)+'</span></button>'; } h += '</div>'; }
+  h += '</div>';
+
+  const lastCi = DB.checkins[0], due = !lastCi || Date.now() - lastCi.at > 27*864e5;
+  h += '<div class="panel"><details'+(due && DB.sessions.length ? " open" : "")+'><summary>Monthly check-in'+(due ? ' · due' : ' · next '+fmtDate(lastCi.at+28*864e5))+'</summary><div style="display:grid;gap:12px;margin-top:12px">'+$("#checkin-help").innerHTML+
+    '<form id="ci-form" style="display:grid;gap:12px"><div class="ci">'+
+    '<label for="ci-weight">Bodyweight (lb)<input id="ci-weight" class="inp" inputmode="decimal"></label>'+
+    '<label for="ci-waist">Waist at navel (in)<input id="ci-waist" class="inp" inputmode="decimal"></label>'+
+    '<label for="ci-neck">Neck (in)<input id="ci-neck" class="inp" inputmode="decimal"></label>'+
+    '<label for="ci-shoulders">Shoulders (in)<input id="ci-shoulders" class="inp" inputmode="decimal"></label>'+
+    '<label for="ci-arm">Upper arm, flexed (in)<input id="ci-arm" class="inp" inputmode="decimal"></label>'+
+    '</div><button class="btn sm" type="submit">Save check-in</button></form>';
   if(DB.checkins.length){
     const cols = [["weight","Weight"],["waist","Waist"],["neck","Neck"],["shoulders","Shoulders"],["arm","Arm"]];
     h += '<div class="tbl-wrap"><table><thead><tr><th>Date</th>'+cols.map(c=>'<th class="num">'+c[1]+'</th>').join("")+'<th></th></tr></thead><tbody>';
-    for(const c of DB.checkins) h += '<tr><td>'+fmtDate(c.at)+'</td>'+cols.map(k=>'<td class="num mono">'+(c[k[0]]!=null?esc(c[k[0]]):"–")+'</td>').join("")+'<td><button class="btn quiet" style="padding:0" data-delci="'+esc(c.id)+'" aria-label="Delete this check-in">×</button></td></tr>';
+    for(const c of DB.checkins) h += '<tr><td>'+fmtDate(c.at)+'</td>'+cols.map(k=>'<td class="num">'+(c[k[0]]!=null?esc(c[k[0]]):"–")+'</td>').join("")+'<td><button class="link" style="padding:0" data-delci="'+esc(c.id)+'" aria-label="Delete this check-in">×</button></td></tr>';
     if(DB.checkins.length>1){
       const a = DB.checkins[DB.checkins.length-1], b = DB.checkins[0];
-      h += '<tr><td><b>Change</b></td>'+cols.map(k=>{ const x=a[k[0]], y=b[k[0]]; if(x==null||y==null) return '<td class="num">–</td>'; const d=r1(y-x); return '<td class="num mono"><b>'+(d>0?"+":"")+d+'</b></td>'; }).join("")+'<td></td></tr>';
+      h += '<tr><td><b>Change</b></td>'+cols.map(k=>{ const x=a[k[0]], y=b[k[0]]; if(x==null||y==null) return '<td class="num">–</td>'; const d=r1(y-x); return '<td class="num"><b>'+(d>0?"+":"")+d+'</b></td>'; }).join("")+'<td></td></tr>';
     }
     h += '</tbody></table></div>';
   }
-  h += '</section>';
-
-  h += '<section class="panel"><h2>History</h2>';
-  if(!DB.sessions.length) h += '<p class="muted">Saved workouts appear here. Tap one to fix a weight or rep count.</p>';
-  else h += '<p class="small muted">Tap a workout to fix a typo or delete it.</p><div>';
-  for(const s of DB.sessions.slice(0,60)){
-    const sets = (s.entries||[]).reduce((a,e)=>a+(e.sets?e.sets.length:0),0);
-    h += '<button class="hist" data-edit="'+esc(s.id)+'"><span><b>'+esc((PLAN[s.workout]||{name:s.workout}).name)+'</b> <span class="muted small">· '+sets+' sets · '+(s.minutes||"?")+' min</span></span><span class="chev" aria-hidden="true">›</span><span class="when">'+fmtDate(s.at)+'</span></button>';
-  }
-  if(DB.sessions.length) h += '</div>';
-  h += '</section>';
+  h += '</div></details></div>';
 
   const lb = DB.lastBackup ? fmtDate(DB.lastBackup) : "never";
   const stale = !DB.lastBackup || Date.now() - DB.lastBackup > 14*864e5;
-  h += '<section class="panel"><h2>Settings and backup</h2>'+
-    '<label class="switch" for="set-bw"><span>Bodyweight for your protein goal (lb)</span><input id="set-bw" class="inp" style="max-width:110px" inputmode="decimal" value="'+esc(DB.settings.bodyweight||"")+'" placeholder="e.g. 150"></label>'+
-    '<label class="switch" for="set-sound"><span>Beep when rest is over <span class="small muted">(silent switch must be on ring)</span></span><input type="checkbox" id="set-sound"'+(DB.settings.sound?" checked":"")+'></label>'+
-    '<button class="btn ghost sm" style="justify-self:start" data-act="test-sound">Test the beep</button>'+
-    '<p class="small muted">Your log is stored only on this phone. Export a backup every couple of weeks (save it to Files or send it to yourself) so a lost or reset phone doesn\'t take your log with it.</p>'+
+  h += '<div class="panel"><p class="sec">Settings and backup</p>'+
+    '<label class="switch" for="set-bw"><span>Bodyweight for your protein goal</span><span class="field" style="max-width:120px"><input id="set-bw" class="inp" inputmode="decimal" value="'+esc(DB.settings.bodyweight||"")+'" placeholder="150"><i>lb</i></span></label>'+
+    '<label class="switch" for="set-sound"><span>Beep when rest is over<br><span class="small muted">The silent switch has to be on ring</span></span><input type="checkbox" id="set-sound"'+(DB.settings.sound?" checked":"")+'></label>'+
+    '<button class="btn ghost sm" style="width:auto;justify-self:start" data-act="test-sound">Test the beep</button>'+
+    '<p class="small muted">Your log is stored only on this phone. Export a backup every couple of weeks so a lost or reset phone doesn\'t take it with it.</p>'+
     (stale && (DB.sessions.length || DB.checkins.length) ? '<p class="note err">Last backup: '+lb+'.</p>' : '<p class="small muted">Last backup: '+lb+'.</p>')+
-    '<div class="row"><button class="btn dark sm" data-act="export">Export backup</button><label class="btn ghost sm" for="imp-file" style="display:inline-block">Import backup</label><input id="imp-file" type="file" hidden><button class="btn ghost sm" data-act="copy-backup">Copy as text</button></div>'+
-    '<details><summary class="small muted">Paste a backup instead (or your log from the claude.ai page)</summary><form id="paste-form" class="stack" style="margin-top:8px"><textarea id="paste-in" class="inp" rows="4" aria-label="Backup text" placeholder="Paste here"></textarea><button class="btn dark sm" style="justify-self:start" type="submit">Import pasted text</button></form></details>'+
-    '</section>';
-  return h;
-}
-
-// ---------- protein ----------
-function target(){
-  let bw = num(DB.settings.bodyweight);
-  if(!bw){ const c = DB.checkins.find(x=>x.weight); if(c) bw = c.weight; }
-  if(!bw || bw < 60 || bw > 600) return null;
-  return {bw, min:Math.round(bw*0.7), max:Math.round(bw*1.0)};
-}
-function dayTotal(k){ return (DB.protein[k]||[]).reduce((a,e)=>a+(e.g||0),0); }
-function addProtein(g, label){
-  g = r1(g); if(!(g>0)) return;
-  const k = dayKey();
-  (DB.protein[k] = DB.protein[k] || []).push({t:Date.now(), g, label:String(label||"").slice(0,80)});
-  persist(); toast("Added "+Math.round(g)+" g");
-}
-function viewProtein(){
-  const t = target(), k = dayKey(), total = Math.round(dayTotal(k)), list = DB.protein[k] || [];
-  let h = '<section class="panel pro-head">';
-  h += '<div class="row spread" style="align-items:flex-end"><div class="pro-num num">'+total+'<small> g today</small></div>';
-  if(t){
-    const left = Math.max(0, t.min - total);
-    h += '<div class="small muted" style="text-align:right">'+(left>0 ? left+' g to your minimum' : (total>=t.max ? 'Top of your range. Done for today.' : 'Minimum hit. Anything more is a bonus.'))+'</div></div>';
-    const scale = Math.max(t.max, total) * 1.05;
-    h += '<div class="meter" role="img" aria-label="'+total+' of '+t.min+' to '+t.max+' grams"><div class="fill" style="width:'+Math.min(100, total/scale*100).toFixed(1)+'%"></div><div class="band" style="left:'+(t.min/scale*100).toFixed(1)+'%;width:'+((t.max-t.min)/scale*100).toFixed(1)+'%"></div></div>';
-    h += '<div class="row spread small muted"><span>Goal '+t.min+'–'+t.max+' g (0.7–1 g per lb)</span><span>at '+t.bw+' lb</span></div>';
-  } else {
-    h += '</div><form id="bw-form" class="row"><label class="small muted" for="bw-in" style="flex:1 1 100%">Your bodyweight sets the goal (0.7–1 g of protein per pound).</label><input id="bw-in" class="inp" inputmode="decimal" placeholder="lb" style="max-width:120px"><button class="btn sm" type="submit">Set goal</button></form>';
-  }
-  h += '</section>';
-
-  h += '<section class="stack"><button class="btn wide" data-act="scan">Scan a barcode</button>'+
-    '<form id="custom-form" class="row" style="flex-wrap:nowrap"><label class="field" style="flex:1"><input id="custom-g" inputmode="decimal" placeholder="Grams of protein" aria-label="Grams of protein"><i>g</i></label><button class="btn dark sm" type="submit">Add</button></form></section>';
-
-  if(DB.foods.length){
-    h += '<section class="panel"><h3>Scanned before</h3><div class="foods">';
-    DB.foods.slice(0,8).forEach(f=>{ const per = f.pServing!=null ? [Math.round(f.pServing)+' g', f.servingLabel||"per serving"] : (f.p100!=null ? [Math.round(f.p100)+' g', "per 100 g"] : ["?", "tap to set"]); h += '<button class="food" data-recent="'+esc(f.code)+'"><b>'+esc(per[0])+'</b><span>'+esc(f.name||"Scanned item")+'</span><small>'+esc(per[1])+'</small></button>'; });
-    h += '</div></section>';
-  }
-
-  h += '<section class="panel"><h3>Quick add</h3><div class="foods">';
-  FOODS.forEach((f,i)=>{ h += '<button class="food" data-food="'+i+'"><b>'+f.g+' g</b><span>'+esc(f.name)+'</span><small>'+esc(f.portion)+'</small></button>'; });
-  h += '</div><p class="small muted">Typical amounts. The label on your actual food beats these numbers.</p></section>';
-
-  h += '<section class="panel"><h3>Today</h3>';
-  if(!list.length) h += '<p class="muted">Nothing logged yet today.</p>';
-  else list.slice().reverse().forEach((e,ri)=>{
-    const i = list.length-1-ri;
-    h += '<div class="entry"><span class="g">'+Math.round(e.g)+' g</span><span>'+esc(e.label||"Protein")+' <span class="small muted">'+new Date(e.t).toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"})+'</span></span><button class="x" data-prm="'+i+'" aria-label="Remove '+Math.round(e.g)+' g">×</button></div>';
-  });
-  h += '</section>';
-
-  // last 7 days
-  const days = [];
-  for(let i=6;i>=0;i--){ const d = new Date(); d.setDate(d.getDate()-i); days.push({k:dayKey(d), d}); }
-  const vals = days.map(x=>Math.round(dayTotal(x.k)));
-  const top = Math.max(t ? t.max : 0, ...vals, 1) * 1.1;
-  h += '<section class="panel"><h3>Last 7 days</h3><div class="week">';
-  if(t) h += '<div class="goal" style="bottom:'+(18 + t.min/top*90).toFixed(0)+'px" aria-hidden="true"></div>';
-  days.forEach((x,i)=>{
-    const v = vals[i], hit = t && v >= t.min;
-    h += '<div class="col"><span class="v">'+(v||"")+'</span><div class="b'+(hit?" hit":"")+'" style="height:'+Math.max(v?3:0, v/top*90).toFixed(0)+'px"></div><span class="d">'+x.d.toLocaleDateString(undefined,{weekday:"narrow"})+'</span></div>';
-  });
-  h += '</div>'+(t?'<p class="small muted">Red bars hit your '+t.min+' g minimum. The dashed line marks it.</p>':'')+'</section>';
-  h += $("#protein-notes").innerHTML;
-  return h;
+    '<div class="row"><button class="btn sm" style="width:auto" data-act="export">Export backup</button><label class="btn ghost sm" style="width:auto" for="imp-file">Import</label><input id="imp-file" type="file" hidden><button class="btn ghost sm" style="width:auto" data-act="copy-backup">Copy as text</button></div>'+
+    '<details><summary>Paste a backup instead (or your log from the claude.ai page)</summary><form id="paste-form" style="display:grid;gap:10px;margin-top:10px"><textarea id="paste-in" class="inp" rows="4" aria-label="Backup text" placeholder="Paste here"></textarea><button class="btn ghost sm" style="width:auto;justify-self:start" type="submit">Import pasted text</button></form></details>'+
+    '<button class="link" style="justify-self:start;padding-left:0" data-act="guide">Open the guide: the plan and the research</button>'+
+    '</div>';
+  return h + '</section>';
 }
 
 // =====================================================================
-// Sheets: edit a workout, one exercise's history, the barcode scanner
+// Sheets
 // =====================================================================
 function openSheet(kind, data){ S.sheet = Object.assign({kind}, data||{}); document.body.classList.add("locked"); renderSheet(); }
 function closeSheet(){
@@ -505,49 +667,167 @@ function closeSheet(){
 function renderSheet(){
   const root = $("#sheet-root"), sh = S.sheet;
   if(!sh){ root.innerHTML = ""; return; }
-  let inner = "";
-  if(sh.kind==="edit") inner = sheetEdit();
-  else if(sh.kind==="exhist") inner = sheetExHist(sh.variant);
-  else if(sh.kind==="scan") inner = sheetScan();
-  else if(sh.kind==="food") inner = sheetFood();
-  root.innerHTML = '<div class="sheet" data-scrim="1"><div class="sheet-in'+(sh.kind==="scan"?" full":"")+'" role="dialog" aria-modal="true">'+inner+'</div></div>';
+  const fn = {overview:sheetOverview, end:sheetEnd, howto:sheetHowto, swap:sheetSwap, pick:sheetPick, guide:sheetGuide,
+    addfood:sheetAddFood, plate:sheetPlate, editfood:sheetEditFood, todaylog:sheetTodayLog,
+    edit:sheetEdit, exhist:()=>sheetExHist(sh.variant), scan:sheetScan, food:sheetFood}[sh.kind];
+  const full = sh.kind==="scan" || sh.kind==="guide";
+  root.innerHTML = '<div class="sheet" data-scrim="1"><div class="sheet-in'+(full?" full":"")+'" role="dialog" aria-modal="true">'+fn()+'</div></div>';
+  numberCites(root);
   if(sh.kind==="scan") attachCamera();
 }
+const head = (title, btn) => '<div class="headrow"><h2>'+title+'</h2><button class="link" style="text-decoration:none" data-act="close">'+(btn||"Close")+'</button></div>';
 
+function sheetOverview(){
+  const W = PLAN[draft.workout];
+  let h = head(esc(W.name));
+  const items = W.items.filter(x=>!x.bonus || draft.bonus===true);
+  items.forEach(it=>{
+    const en = entry(it), done = en.sets.filter(s=>s.done).length, cur = draft.cur && draft.cur.ex===it.id;
+    h += '<button class="ov'+(cur?" cur":"")+'" data-act="jump" data-ex="'+it.id+'"><span>'+esc(en.variant)+'<br><small>'+(draft.skipped[it.id] ? "skipped" : done+" of "+en.sets.length+" sets")+(it.bonus?" · bonus":"")+'</small></span><span class="dots">'+en.sets.map(s=>'<i class="'+(s.done?"on":"")+'"></i>').join("")+'</span></button>';
+  });
+  h += '<button class="btn ghost" data-act="end">Finish or end workout</button>';
+  return h;
+}
+function sheetEnd(){
+  const n = Object.values(draft.entries).reduce((a,en)=>a+en.sets.filter(s=>s.done).length,0);
+  let h = head("End workout?", "Keep going");
+  if(n){
+    h += '<p class="muted">'+plural(n,"set")+' logged so far.</p><button class="btn" data-act="finish">Finish and save</button>';
+  } else h += '<p class="muted">Nothing logged yet.</p>';
+  if(S.confirm==="discard") h += '<div class="confirm"><b>Throw away this workout?</b><span class="small">Logged sets will be lost.</span><div class="two"><button class="btn sm" data-act="discard-yes">Discard</button><button class="btn ghost sm" data-act="cancel-confirm">Keep it</button></div></div>';
+  else h += '<button class="btn danger" data-act="discard">Discard workout</button>';
+  h += '<button class="btn ghost" data-act="close">Keep going</button>';
+  return h;
+}
+function sheetHowto(){
+  const it = curItem(), en = entry(it), last = lastFor(it.id, en.variant);
+  return head(esc(en.variant))+'<p>'+esc(it.cue)+'</p><p class="small muted">'+plural(it.sets,"set")+' × '+it.lo+'–'+it.hi+' reps · rest '+it.rest+' s. End each set with 0–2 reps left in you. When you hit '+it.hi+' on every set, go up one pin next time.</p>'+
+    (last ? '<p class="small muted">Last time ('+fmtDate(last.at)+'): '+last.sets.map(s=>esc(s.w)+'×'+esc(s.r)).join(", ")+'</p>' : '');
+}
+function sheetSwap(){
+  const it = curItem(), en = entry(it);
+  let h = head("Machine taken?")+'<p class="small muted">Pick what\'s free. Your numbers are tracked separately for each version.</p>';
+  [it.name].concat(it.swaps).forEach(n=>{ h += '<button class="opt'+(n===en.variant?" on":"")+'" data-act="setvariant" data-name="'+esc(n)+'"><span>'+esc(n)+'</span><span class="muted small">'+(lastFor(it.id,n) ? "logged before" : "")+'</span></button>'; });
+  return h;
+}
+function sheetPick(){
+  const nxt = nextWorkout();
+  let h = head("Pick a workout");
+  ROT.forEach(k=>{ h += '<button class="opt'+(k===(S.chosen||nxt)?" on":"")+'" data-act="pickw" data-k="'+k+'"><span>'+esc(PLAN[k].name)+'<br><span class="small muted">'+esc(PLAN[k].focus)+'</span></span><span class="small muted">'+(k===nxt?"next up":"")+'</span></button>'; });
+  return h + '<p class="small muted">Switching is fine when a machine you need is packed. The loop continues from whatever you do.</p>';
+}
+function sheetGuide(){
+  let h = head("Guide", "Done");
+  h += '<div class="seg"><button aria-pressed="'+(S.guideTab==="plan")+'" data-act="gtab" data-t="plan">The plan</button><button aria-pressed="'+(S.guideTab==="why")+'" data-act="gtab" data-t="why">Why it works</button></div>';
+  return h + '<div class="guide">'+(S.guideTab==="plan" ? guidePlan() : $("#why-src").innerHTML)+'</div>';
+}
+function guidePlan(){
+  let h = '<section class="guide-sec"><h2>How it works</h2><ul class="rules">'+
+    '<li><b>Go 3–4 times a week and do the next workout in the loop:</b> Upper 1 → Lower 1 → Upper 2 → Lower 2 → repeat. No fixed days, so a missed day never breaks the plan.</li>'+
+    '<li><b>About 35 minutes, hard cap at 40.</b> At 40, finish. That counts as a full workout. The bonus is the only thing you\'re allowed to skip.</li>'+
+    '<li><b>Effort:</b> end each set with 0–2 more reps left in you. Going all the way to failure adds almost nothing and leaves you sorer for longer.</li>'+
+    '<li><b>Getting stronger:</b> when you hit the top of the rep range on every set, go up one pin next time. The app fills that in for you.</li>'+
+    '<li><b>Paired exercises</b> alternate automatically with short rests, which saves about 40% of the time. If the rec is packed, use Skip and come back, or swap machines.</li>'+
+    '<li><b>Rest beep:</b> plays over your music, but only with the silent switch on ring. Keep the app open; the screen stays on.</li>'+
+    '</ul></section>';
+  h += '<section class="guide-sec"><h2>When the rec is packed</h2><ul class="rules">'+
+    '<li>Tap <b>Machine taken?</b> and pick a free swap. Don\'t wait more than about 2 minutes.</li>'+
+    '<li>Asking "how many sets do you have left?" or "mind if I work in?" is normal gym etiquette.</li>'+
+    '<li>College recs are usually busiest late afternoon into the evening. Early mornings and early afternoons are quieter.</li>'+
+    '</ul></section>';
+  h += '<section class="guide-sec"><h2>The four workouts</h2>';
+  for(const k of ROT){
+    const W = PLAN[k];
+    h += '<div class="wk"><h3 style="margin-top:6px">'+esc(W.name)+'</h3>';
+    for(const it of W.items) h += '<div class="wk-row"><span class="t">'+esc(it.bonus?"+":it.tag)+'</span><span>'+esc(it.name)+(it.bonus?' <span class="muted small">(bonus)</span>':'')+'</span><span class="d">'+it.sets+'×'+it.lo+'–'+it.hi+'</span></div>';
+    h += '</div>';
+  }
+  h += '</section>';
+  return h + $("#plan-extra").innerHTML;
+}
+
+// ---------- foods ----------
+function sheetAddFood(){
+  const sh = S.sheet;
+  return head("Add food", "Cancel")+
+    '<form id="addfood-form" style="display:grid;gap:12px">'+
+    '<label class="small muted" for="af-name">Name</label><input id="af-name" class="inp" placeholder="e.g. Al pastor pork loin" value="'+esc(sh.name||"")+'">'+
+    '<label class="small muted" for="af-g">Protein per serving</label><label class="field"><input id="af-g" class="inp" inputmode="decimal" placeholder="e.g. 15" value="'+esc(sh.g||"")+'"><i>g</i></label>'+
+    '<label class="small muted" for="af-where">Where it\'s from (optional)</label><input id="af-where" class="inp" placeholder="e.g. The Edge" value="'+esc(sh.where==null?"The Edge":sh.where)+'">'+
+    '<button class="btn" type="submit">Save to your foods and add</button>'+
+    '<button class="btn ghost" type="button" data-act="af-once">Just add it once</button>'+
+    '</form><p class="small muted">On the dining site, tap a dish to see its protein. Save it once here and it\'s one tap from then on. Scanning works for packaged food.</p>';
+}
+function sheetPlate(){
+  const sh = S.sheet, rows = foodRows().filter(r=>!r.plate);
+  rows.sort((a,b)=> (b.n-a.n) || ((b.mine?1:0)-(a.mine?1:0)));
+  sh.picked = sh.picked || {};
+  const total = rows.filter(r=>sh.picked[r.key]).reduce((a,r)=>a+r.g,0);
+  let h = head("Make a plate", "Cancel")+'<p class="small muted">A plate is a meal you repeat, like your usual burger plate. Pick its parts and it becomes one tap.</p>'+
+    '<form id="plate-form" style="display:grid;gap:12px"><label class="small muted" for="pl-name">Plate name</label><input id="pl-name" class="inp" placeholder="e.g. Burger plate" value="'+esc(sh.name||"")+'"><div>';
+  rows.forEach(r=>{ h += '<label class="check"><input type="checkbox" data-pick="'+esc(r.key)+'"'+(sh.picked[r.key]?" checked":"")+'><span>'+esc(r.name)+'<br><span class="small muted">'+esc(r.sub)+'</span></span><b class="num">'+Math.round(r.g)+' g</b></label>'; });
+  h += '</div><p class="muted" id="pl-total">Total: <b class="num">'+Math.round(total)+' g</b></p><button class="btn" type="submit">Save plate</button></form>';
+  return h + '<p class="small muted">Missing a part? Add it with + Add food first, then make the plate.</p>';
+}
+function sheetEditFood(){
+  const f = DB.myFoods.find(x=>x.id===S.sheet.id); if(!f) return head("Not found");
+  let h = head("Edit "+(f.items?"plate":"food"), "Cancel")+'<form id="editfood-form" style="display:grid;gap:12px">'+
+    '<label class="small muted" for="ef-name">Name</label><input id="ef-name" class="inp" value="'+esc(f.name)+'">';
+  if(f.items){
+    h += '<div>'; f.items.forEach((it,k)=>{ h += '<div class="entry"><span class="g">'+Math.round(it.g)+' g</span><span>'+esc(it.name)+'</span><button type="button" class="x" data-act="ef-rmitem" data-k="'+k+'" aria-label="Remove '+esc(it.name)+'">×</button></div>'; }); h += '</div>';
+    h += '<p class="muted">Total: <b class="num">'+Math.round(f.items.reduce((a,x)=>a+x.g,0))+' g</b></p>';
+  } else {
+    h += '<label class="small muted" for="ef-g">Protein per serving</label><label class="field"><input id="ef-g" class="inp" inputmode="decimal" value="'+esc(f.g)+'"><i>g</i></label>'+
+      '<label class="small muted" for="ef-where">Where it\'s from</label><input id="ef-where" class="inp" value="'+esc(f.where||"")+'">';
+  }
+  h += '<button class="btn" type="submit">Save</button></form>';
+  h += S.confirm==="delfood" ? '<div class="confirm"><b>Delete '+esc(f.name)+'?</b><div class="two"><button class="btn sm" data-act="ef-del-yes">Delete</button><button class="btn ghost sm" data-act="cancel-confirm">Keep</button></div></div>' : '<button class="btn danger" data-act="ef-del">Delete</button>';
+  return h;
+}
+function sheetTodayLog(){
+  const k = dayKey(), list = DB.protein[k] || [];
+  let h = head("Today · "+Math.round(dayTotal(k))+" g");
+  if(!list.length) return h + '<p class="muted">Nothing logged yet today.</p>';
+  h += '<div>';
+  list.slice().reverse().forEach((e,ri)=>{ const i = list.length-1-ri; h += '<div class="entry"><span class="g">'+Math.round(e.g)+' g</span><span>'+esc(e.label||"Protein")+' <span class="small muted">'+new Date(e.t).toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"})+'</span></span><button class="x" data-prm="'+i+'" aria-label="Remove '+Math.round(e.g)+' g">×</button></div>'; });
+  return h + '</div>';
+}
+
+// ---------- history editing ----------
 function sheetEdit(){
   const s = S.edit;
-  let h = '<div class="sheet-head"><h2>'+esc((PLAN[s.workout]||{name:s.workout}).name)+'</h2><button class="btn quiet" data-act="close">Close</button></div>';
+  let h = head(esc((PLAN[s.workout]||{name:s.workout}).name), "Cancel");
   h += '<p class="small muted">'+fmtDate(s.at)+' · '+(s.minutes||"?")+' min. Change any number, then save.</p>';
   s.entries.forEach((e,ei)=>{
-    h += '<div class="panel"><div class="row spread"><h3>'+esc(e.variant)+'</h3><button class="btn quiet" style="padding:0" data-rmex="'+ei+'">Remove</button></div>';
+    h += '<div class="panel-box"><div class="headrow"><h3>'+esc(e.variant)+'</h3><button class="link" style="padding:0" data-rmex="'+ei+'">Remove</button></div>';
     e.sets.forEach((st,si)=>{
-      h += '<div class="edit-set"><span class="mono small muted">Set '+(si+1)+'</span>'+
-        '<label class="field"><input inputmode="decimal" aria-label="Weight" data-ew="'+ei+'" data-si="'+si+'" value="'+esc(st.w)+'"><i>lb</i></label>'+
-        '<label class="field"><input inputmode="numeric" aria-label="Reps" data-er="'+ei+'" data-si="'+si+'" value="'+esc(st.r)+'"><i>reps</i></label>'+
-        '<button class="rm" data-rmset="'+ei+':'+si+'" aria-label="Remove set '+(si+1)+'">×</button></div>';
+      h += '<div class="row" style="flex-wrap:nowrap"><span class="small muted" style="width:44px">Set '+(si+1)+'</span>'+
+        '<label class="field grow"><input class="inp" inputmode="decimal" aria-label="Weight" data-ew="'+ei+'" data-si="'+si+'" value="'+esc(st.w)+'"><i>lb</i></label>'+
+        '<label class="field grow"><input class="inp" inputmode="numeric" aria-label="Reps" data-er="'+ei+'" data-si="'+si+'" value="'+esc(st.r)+'"><i>reps</i></label>'+
+        '<button class="x" data-rmset="'+ei+':'+si+'" aria-label="Remove set '+(si+1)+'">×</button></div>';
     });
-    h += '<button class="btn ghost sm" style="justify-self:start" data-addset="'+ei+'">+ Add set</button></div>';
+    h += '<button class="btn ghost sm" style="width:auto;justify-self:start" data-addset="'+ei+'">+ Add set</button></div>';
   });
   if(!s.entries.length) h += '<p class="note">No exercises left. Save to keep it empty, or delete the workout.</p>';
-  h += '<button class="btn wide" data-act="edit-save">Save changes</button>';
-  if(S.confirm==="edit-del") h += '<div class="confirm"><b>Delete this workout?</b><span class="small">This can\'t be undone (unless you have a backup).</span><div class="row"><button class="btn" data-act="edit-del-yes">Delete</button><button class="btn ghost" data-act="cancel-sheet">Keep it</button></div></div>';
-  else h += '<button class="btn quiet" data-act="edit-del">Delete this workout</button>';
+  h += '<button class="btn" data-act="edit-save">Save changes</button>';
+  if(S.confirm==="edit-del") h += '<div class="confirm"><b>Delete this workout?</b><span class="small">This can\'t be undone unless you have a backup.</span><div class="two"><button class="btn sm" data-act="edit-del-yes">Delete</button><button class="btn ghost sm" data-act="cancel-confirm">Keep it</button></div></div>';
+  else h += '<button class="btn danger" data-act="edit-del">Delete this workout</button>';
   return h;
 }
 function sheetExHist(variant){
   const rows = [];
-  for(const s of DB.sessions){
-    const e = (s.entries||[]).find(x=>x.variant===variant);
-    if(e && e.sets.length) rows.push({s, e});
-  }
-  let h = '<div class="sheet-head"><h2>'+esc(variant)+'</h2><button class="btn quiet" data-act="close">Close</button></div>';
+  for(const s of DB.sessions){ const e = (s.entries||[]).find(x=>x.variant===variant); if(e && e.sets.length) rows.push({s, e}); }
+  let h = head(esc(variant));
   if(!rows.length) return h + '<p class="muted">No sets logged for this one yet.</p>';
   const best = rows.reduce((a,x)=>{ const t = topSet(x.e.sets); return (!a || t.w>a.w || (t.w===a.w && t.r>a.r)) ? t : a; }, null);
-  h += '<p class="small muted">'+rows.length+' workout'+(rows.length===1?'':'s')+'. Best set: <b class="mono">'+esc(best.w)+' lb × '+esc(best.r)+'</b>. Tap a row to fix it.</p><div class="panel" style="padding-block:4px">';
-  rows.forEach(x=>{
-    h += '<button class="hist" data-edit="'+esc(x.s.id)+'"><span class="mono" style="font-size:14px">'+x.e.sets.map(st=>esc(st.w)+'×'+esc(st.r)).join(', ')+'</span><span class="chev" aria-hidden="true">›</span><span class="when">'+fmtDate(x.s.at)+'</span></button>';
-  });
+  h += '<p class="small muted">'+plural(rows.length,"workout")+'. Best set: <b class="num">'+esc(best.w)+' lb × '+esc(best.r)+'</b>. Tap a row to fix it.</p><div>';
+  rows.forEach(x=>{ h += '<button class="hist" data-edit="'+esc(x.s.id)+'"><span class="num" style="font-size:15px">'+x.e.sets.map(st=>esc(st.w)+'×'+esc(st.r)).join(', ')+'</span><span class="chev" aria-hidden="true">›</span><span class="when">'+fmtDate(x.s.at)+'</span></button>'; });
   return h + '</div>';
+}
+function openEdit(id){
+  const s = DB.sessions.find(x=>x.id===id); if(!s) return;
+  S.edit = JSON.parse(JSON.stringify(s)); S.confirm = null;
+  openSheet("edit", {});
 }
 
 // ---------- barcode scanning ----------
@@ -556,11 +836,10 @@ function sheetExHist(variant){
 let stream = null, scanTimer = null, detector = null, scanBusy = false, parkTimer = null;
 function sheetScan(){
   const sh = S.sheet;
-  let h = '<div class="sheet-head"><h2>Scan</h2><button class="btn quiet" data-act="close">Cancel</button></div>';
-  h += '<div class="scanbox"><video id="scan-video" playsinline muted autoplay></video><div class="aim" aria-hidden="true"></div></div>';
-  h += '<p class="small muted" id="scan-status" role="status">'+esc(sh.status || "Starting the camera…")+'</p>';
-  h += '<form id="code-form" class="row" style="flex-wrap:nowrap"><input id="code-in" class="inp" inputmode="numeric" placeholder="Or type the barcode number" aria-label="Barcode number" style="flex:1"><button class="btn dark sm" type="submit">Look up</button></form>';
-  return h;
+  return head("Scan", "Cancel")+
+    '<div class="scanbox"><video id="scan-video" playsinline muted autoplay></video><div class="aim" aria-hidden="true"></div></div>'+
+    '<p class="small muted" id="scan-status" role="status">'+esc(sh.status || "Starting the camera…")+'</p>'+
+    '<form id="code-form" class="row" style="flex-wrap:nowrap"><input id="code-in" class="inp grow" inputmode="numeric" placeholder="Or type the barcode number" aria-label="Barcode number"><button class="btn ghost sm" style="width:auto" type="submit">Look up</button></form>';
 }
 function scanStatus(msg){ if(S.sheet) S.sheet.status = msg; const el = $("#scan-status"); if(el) el.textContent = msg; }
 async function attachCamera(){
@@ -579,7 +858,7 @@ async function attachCamera(){
     await video.play().catch(()=>{});
   }catch(e){
     scanStatus(e && e.name==="NotAllowedError"
-      ? "Camera access is off. Allow it in Settings → Safari → Camera (or for this app), or type the number below."
+      ? "Camera access is off. Allow it when asked (or in Settings), or type the number below."
       : "Couldn't start the camera. Type the barcode number below instead.");
     return;
   }
@@ -617,8 +896,6 @@ function stopCamera(){
   clearInterval(scanTimer); scanTimer = null; clearTimeout(parkTimer);
   if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
 }
-document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="hidden") stopCamera(); });
-
 // iPhone Safari has no built-in barcode reader, so this loads ZXing (compiled to WebAssembly)
 // behind the standard BarcodeDetector API. Pinned version; the service worker caches it after first use.
 const SCANNER_LIB = "https://cdn.jsdelivr.net/npm/barcode-detector@3.2.2/dist/es/ponyfill.min.js";
@@ -634,7 +911,6 @@ async function makeDetector(){
   if(mod.prepareZXingModule) mod.prepareZXingModule({fireImmediately:true});
   return new mod.BarcodeDetector({formats:FORMATS});
 }
-
 // Look a barcode up: this phone's saved foods first, then Open Food Facts, then USDA's branded-food data.
 function codeVariants(code){
   const c = String(code).replace(/\D/g,""), out = [c];
@@ -691,36 +967,34 @@ async function lookupUSDA(code){
   const u = unit==="MLT" || unit==="ML" ? "ml" : "g";
   const pServing = p100!=null && ss && ["GRM","G","MLT","ML"].includes(unit) ? r1(p100*ss/100) : null;
   const name = String(hit.description||"").toLowerCase().replace(/\b\w/g, m=>m.toUpperCase());
-  return {code, name, brand:hit.brandName||hit.brandOwner||"", pServing,
-    servingLabel:hit.householdServingFullText || (ss ? ss+" "+u : ""), p100, unit:u, source:"usda"};
+  return {code, name, brand:hit.brandName||hit.brandOwner||"", pServing, servingLabel:hit.householdServingFullText || (ss ? ss+" "+u : ""), p100, unit:u, source:"usda"};
 }
 function sheetFood(){
   const sh = S.sheet, f = sh.food;
-  let h = '<div class="sheet-head"><h2>'+(sh.missing ? "Not found" : "Add protein")+'</h2><button class="btn quiet" data-act="close">Cancel</button></div>';
+  let h = head(sh.missing ? "Not found" : "Add protein", "Cancel");
   if(sh.missing){
     h += '<p class="muted">'+(sh.offline ? "Couldn't reach the food databases (no signal, or they're busy)." : "This barcode isn't in the food databases yet.")+' Read the protein off the label once and the app will remember it for next time.</p>';
   } else {
-    h += '<div class="result"><h3 style="font-size:24px">'+esc(f.name || "Unnamed product")+'</h3>'+(f.brand?'<p class="muted">'+esc(f.brand)+'</p>':'');
-    if(f.pServing!=null) h += '<p><b class="mono">'+esc(f.pServing)+' g</b> protein per serving'+(f.servingLabel?' <span class="muted">('+esc(f.servingLabel)+')</span>':'')+'</p>';
+    h += '<div style="display:grid;gap:6px"><h3 style="font-size:22px">'+esc(f.name || "Unnamed product")+'</h3>'+(f.brand?'<p class="muted">'+esc(f.brand)+'</p>':'');
+    if(f.pServing!=null) h += '<p><b class="num">'+esc(f.pServing)+' g</b> protein per serving'+(f.servingLabel?' <span class="muted">('+esc(f.servingLabel)+')</span>':'')+'</p>';
     if(f.p100!=null) h += '<p class="small muted">'+esc(r1(f.p100))+' g per 100 '+(f.unit==="ml"?"ml":"g")+'</p>';
     const src = {off:"From Open Food Facts, a volunteer database.", usda:"From USDA FoodData Central (label data the brand submitted)."}[f.source];
     h += '<p class="small muted">'+(src ? src+" If it doesn't match your label, fix it below." : "Saved on this phone from a previous scan.")+'</p></div>';
   }
-  const needServing = f.pServing==null;
-  if(needServing && f.p100!=null && !sh.missing){
-    h += '<label class="small muted" for="food-grams">This product has no serving size listed. How many grams did you eat?</label><label class="field"><input id="food-grams" inputmode="decimal" value="'+esc(sh.grams||"")+'" placeholder="e.g. 150"><i>g</i></label>';
+  if(f.pServing==null && f.p100!=null && !sh.missing && !sh.fix){
+    h += '<label class="small muted" for="food-grams">This product has no serving size listed. How many grams did you eat?</label><label class="field"><input id="food-grams" class="inp" inputmode="decimal" value="'+esc(sh.grams||"")+'" placeholder="e.g. 150"><i>g</i></label>';
   } else {
     if(sh.missing || sh.fix){
-      h += '<div class="stack"><label class="small muted" for="food-name">Name (optional)</label><input id="food-name" class="inp" value="'+esc(f.name||"")+'" placeholder="e.g. Chocolate protein bar">'+
-        '<label class="small muted" for="food-p">Protein per serving, from the label</label><label class="field"><input id="food-p" inputmode="decimal" value="'+esc(f.pServing!=null?f.pServing:"")+'" placeholder="g"><i>g</i></label>'+
-        '<label class="small muted" for="food-sl">Serving size (optional)</label><input id="food-sl" class="inp" value="'+esc(f.servingLabel||"")+'" placeholder="e.g. 1 bar"></div>';
+      h += '<label class="small muted" for="food-name">Name (optional)</label><input id="food-name" class="inp" value="'+esc(f.name||"")+'" placeholder="e.g. Chocolate protein bar">'+
+        '<label class="small muted" for="food-p">Protein per serving, from the label</label><label class="field"><input id="food-p" class="inp" inputmode="decimal" value="'+esc(f.pServing!=null?f.pServing:"")+'" placeholder="g"><i>g</i></label>'+
+        '<label class="small muted" for="food-sl">Serving size (optional)</label><input id="food-sl" class="inp" value="'+esc(f.servingLabel||"")+'" placeholder="e.g. 1 bar">';
     }
-    h += '<div class="label">Servings</div><div class="stepper"><button data-step="-0.5" aria-label="Half a serving less">−</button><output id="food-serv">'+sh.servings+'</output><button data-step="0.5" aria-label="Half a serving more">+</button></div>';
+    h += '<p class="sec">Servings</p><div class="stepper"><button data-step="-0.5" aria-label="Half a serving less">−</button><output id="food-serv">'+sh.servings+'</output><button data-step="0.5" aria-label="Half a serving more">+</button></div>';
   }
   const g = foodGrams();
-  h += '<button class="btn wide" data-act="food-add"'+(g>0?"":" disabled")+'>'+(g>0 ? "Add "+Math.round(g)+" g" : "Enter the protein to add it")+'</button>';
-  if(!sh.missing && !sh.fix && f.pServing!=null) h += '<button class="btn quiet" data-act="food-fix">The numbers are wrong? Fix them</button>';
-  if(!sh.missing) h += '<p class="small muted">Barcode '+esc(f.code)+'</p>';
+  h += '<button class="btn" data-act="food-add"'+(g>0?"":" disabled")+'>'+(g>0 ? "Add "+Math.round(g)+" g" : "Enter the protein to add it")+'</button>';
+  if(!sh.missing && !sh.fix && f.pServing!=null) h += '<button class="link" data-act="food-fix">The numbers are wrong? Fix them</button>';
+  if(!sh.missing) h += '<p class="tiny muted">Barcode '+esc(f.code)+'</p>';
   return h;
 }
 function foodGrams(){
@@ -732,127 +1006,193 @@ function foodGrams(){
 function rememberFood(f){
   if(!f.code) return;
   DB.foods = DB.foods.filter(x=>x.code!==f.code);
-  DB.foods.unshift({code:f.code, name:f.name||"", brand:f.brand||"", pServing:f.pServing, servingLabel:f.servingLabel||"", p100:f.p100!=null?f.p100:null, source:f.source==="off"?"off":"you"});
-  DB.foods = DB.foods.slice(0,40);
+  DB.foods.unshift({code:f.code, name:f.name||"", brand:f.brand||"", pServing:f.pServing, servingLabel:f.servingLabel||"", p100:f.p100!=null?f.p100:null, unit:f.unit||"g", source:f.source==="you"?"you":f.source});
+  DB.foods = DB.foods.slice(0,60);
+}
+function syncFoodInputs(){
+  const sh = S.sheet; if(!sh || sh.kind!=="food") return;
+  const n = $("#food-name"), p = $("#food-p"), sl = $("#food-sl"), gr = $("#food-grams");
+  if(n) sh.food.name = n.value.trim();
+  if(p){ const v = num(p.value); sh.food.pServing = v && v>0 ? v : null; }
+  if(sl) sh.food.servingLabel = sl.value.trim();
+  if(gr) sh.grams = gr.value.trim();
 }
 
 // =====================================================================
-// Timer bar
+// Timer: clock, 40-minute bar, rest ring, and the pill on other tabs
 // =====================================================================
-let ticker = null, flashed = false;
-function startTicker(){ if(!ticker) ticker = setInterval(tick, 1000); }
+let ticker = null;
+function startTicker(){ if(!ticker) ticker = setInterval(tick, 500); }
 function stopTicker(){ if(ticker){ clearInterval(ticker); ticker = null; } }
 function tick(){
+  const pill = $("#pill");
+  const showPill = !!draft && UI.tab!=="train" && !showInstall();
+  pill.hidden = !showPill;
+  document.body.classList.toggle("pill", showPill);
   if(!draft){ stopTicker(); return; }
-  const el = (Date.now() - draft.startedAt)/1000, mins = el/60;
-  let p = "";
-  for(let i=0;i<8;i++){
-    const lo = i*5, hi = lo+5;
-    if(mins>=hi) p += '<div class="plate full"><span>'+hi+'</span></div>';
-    else if(mins>lo) p += '<div class="plate"><div class="fill" style="width:'+((mins-lo)/5*100).toFixed(0)+'%"></div><span>'+hi+'</span></div>';
-    else p += '<div class="plate"><span>'+hi+'</span></div>';
+  const now = Date.now(), el = (now - draft.startedAt)/1000;
+  const resting = draft.restEnd && draft.restEnd > now;
+  if(draft.restEnd && draft.restEnd <= now){
+    draft.restEnd = null; saveDraft();
+    if(UI.tab==="train" && !S.finish){ render(); const v = $("#view"); v.classList.remove("flash"); void v.offsetWidth; v.classList.add("flash"); setTimeout(()=>v.classList.remove("flash"), 3000); }
+    try{ navigator.vibrate && navigator.vibrate([200,100,200]); }catch(e){}
+    return;
   }
-  $("#stack").innerHTML = p;
-  $("#clock").textContent = mmss(el)+" of 40:00";
-  const r = $("#rest"), m = $("#barmsg"), bar = $("#bar");
-  if(draft.restEnd){
-    const left = (draft.restEnd - Date.now())/1000;
-    if(left>0){ r.className = "rest"; r.innerHTML = '<small>Rest · tap to skip</small>'+mmss(left); flashed = false; }
-    else {
-      r.className = "rest go"; r.innerHTML = '<small>Rest done</small>Go';
-      if(!flashed){ flashed = true; bar.classList.remove("flash"); void bar.offsetWidth; bar.classList.add("flash"); try{ navigator.vibrate && navigator.vibrate([200,100,200]); }catch(e){} }
-    }
-  } else { r.className = "rest"; r.innerHTML = '<small>Rest</small>–'; }
-  if(mins>=40){ m.hidden = false; m.textContent = "40 minutes. You're done: tap Finish and save, then go home."; }
-  else if(mins>=33){ m.hidden = false; m.textContent = "Under 7 minutes left. Skip the bonus move if you need to."; }
-  else m.hidden = true;
+  const clk = $("#clk"); if(clk) clk.textContent = mmss(el);
+  const b = $("#b40"); if(b) b.style.width = Math.min(100, el/2400*100).toFixed(1)+"%";
+  if(resting){
+    const left = (draft.restEnd - now)/1000, tot = draft.restFor || 60;
+    const rp = $("#ringp"); if(rp) rp.setAttribute("stroke-dashoffset", (282.74*(1 - left/tot)).toFixed(1));
+    const rt = $("#ringt"); if(rt) rt.textContent = mmss(left);
+  }
+  if(showPill) pill.innerHTML = '<span>'+esc(PLAN[draft.workout].name)+' · <b>'+mmss(el)+'</b></span><b>'+(resting ? "Rest "+mmss((draft.restEnd-now)/1000) : "Back to workout ›")+'</b>';
 }
-let wake = null;
-async function requestWake(){ try{ if(navigator.wakeLock && !wake && document.visibilityState==="visible"){ wake = await navigator.wakeLock.request("screen"); wake.addEventListener("release",()=>{ wake = null; }); } }catch(e){ wake = null; } }
-document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible"){ if(draft){ requestWake(); tick(); } if(UI.tab==="protein") renderSafe(); } });
+function focusTyping(){ const t = $("#typing"); if(t){ t.focus(); t.select(); } }
+function commitTyping(){
+  const t = $("#typing"); if(!t || !S.typing || !draft) { S.typing = null; return; }
+  const item = curItem(), s = item && entry(item).sets[draft.cur.i];
+  if(s){
+    const v = vals(item, draft.cur.i);
+    if(S.typing==="w"){ const n = num(t.value); s.w = n!=null && n>=0 ? r1(n) : null; s.r = v.r; }
+    else { const n = parseInt(t.value,10); s.r = isFinite(n) && n>=0 ? n : v.r; s.w = v.w; }
+    saveDraft();
+  }
+  S.typing = null;
+}
 
 // =====================================================================
-// Events
+// Events (one delegated handler for the page and the sheets)
 // =====================================================================
-document.querySelector("nav.tabs").addEventListener("click", e=>{
-  const b = e.target.closest("button[data-tab]"); if(!b) return;
-  UI.tab = b.dataset.tab; S.confirm = null; S.error = null; saveUI(); render(); window.scrollTo(0,0);
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState==="visible"){ if(draft){ requestWake(); tick(); } renderSafe(); }
+  else stopCamera();
 });
-$("#rest").addEventListener("click", ()=>{ if(draft && draft.restEnd){ draft.restEnd = null; saveDraft(); cancelBeep(); tick(); } });
+$("#pill").addEventListener("click", ()=>{ UI.tab = "train"; saveUI(); render(); window.scrollTo(0,0); });
 
-const view = $("#view");
-view.addEventListener("click", e=>{
-  const c = e.target.closest("a.cite");
-  if(c){
+document.addEventListener("click", e=>{
+  const cite = e.target.closest("a.cite");
+  if(cite){
     e.preventDefault();
-    const id = c.getAttribute("href").slice(1);
-    if(UI.tab!=="why"){ UI.tab = "why"; saveUI(); render(); }
+    const id = cite.getAttribute("href").slice(1);
+    if(!S.sheet || S.sheet.kind!=="guide"){ openSheet("guide"); }
+    if(S.guideTab!=="why"){ S.guideTab = "why"; renderSheet(); }
     const el = document.getElementById(id);
     if(el){ el.scrollIntoView({block:"center"}); el.classList.add("flash"); setTimeout(()=>el.classList.remove("flash"), 1800); }
     return;
   }
+  if(e.target.dataset && e.target.dataset.scrim){ closeSheet(); return; }
   const t = e.target.closest("button"); if(!t) return;
   const d = t.dataset;
-  if(d.pick){ S.chosen = d.pick; S.error = null; render(); return; }
-  if(d.done){
-    const item = PLAN[currentKey()].items.find(x=>x.id===d.done), i = +d.i;
-    const en = entryFor(item), s = en.sets[i];
-    const wIn = $("#w-"+item.id+"-"+i);
-    if(s.w==="" && wIn && wIn.value) s.w = wIn.value;
-    s.done = !s.done;
-    if(s.done){ draft.restEnd = Date.now() + item.rest*1000; scheduleBeep(item.rest); requestWake(); }
-    else { draft.restEnd = null; cancelBeep(); }
-    saveDraft(); render(); return;
-  }
+  if(d.tab){ UI.tab = d.tab; S.confirm = null; if(d.tab!=="train" && S.finish) S.finish = null; saveUI(); closeSheet(); render(); window.scrollTo(0,0); return; }
+  if(d.log){ const r = foodRows().find(x=>x.key===d.log); if(r){ addProtein(r.g, r.name, r.key); render(); } return; }
   if(d.exhist){ openSheet("exhist", {variant:d.exhist}); return; }
   if(d.edit){ openEdit(d.edit); return; }
   if(d.delci){ DB.checkins = DB.checkins.filter(x=>x.id!==d.delci); persist(); render(); toast("Check-in deleted"); return; }
-  if(d.food){ const f = FOODS[+d.food]; if(f){ addProtein(f.g, f.name+" ("+f.portion+")"); render(); } return; }
-  if(d.recent){ const f = DB.foods.find(x=>x.code===d.recent); if(f) openSheet("food", {food:Object.assign({}, f), servings:1}); return; }
-  if(d.prm){ const k = dayKey(), list = DB.protein[k] || []; list.splice(+d.prm, 1); if(!list.length) delete DB.protein[k]; persist(); render(); return; }
+  if(d.prm){ const k = dayKey(), list = DB.protein[k] || []; list.splice(+d.prm, 1); if(!list.length) delete DB.protein[k]; persist(); render(); renderSheet(); return; }
+  if(d.step && S.sheet){ syncFoodInputs(); S.sheet.servings = Math.max(0.5, Math.min(20, S.sheet.servings + parseFloat(d.step))); renderSheet(); return; }
+  if(d.addset && S.edit){ const e2 = S.edit.entries[+d.addset], last = e2.sets[e2.sets.length-1]; e2.sets.push({w:last?last.w:0, r:last?last.r:0}); renderSheet(); return; }
+  if(d.rmset && S.edit){ const [ei,si] = d.rmset.split(":").map(Number); S.edit.entries[ei].sets.splice(si,1); if(!S.edit.entries[ei].sets.length) S.edit.entries.splice(ei,1); renderSheet(); return; }
+  if(d.rmex && S.edit){ S.edit.entries.splice(+d.rmex,1); renderSheet(); return; }
+  if(!d.act) return;
   switch(d.act){
-    case "hide-install": UI.hideInstall = true; saveUI(); render(); return;
-    case "start": audio(); ensureDraft(); render(); return;
-    case "discard": S.confirm = "discard"; render(); return;
-    case "cancel": S.confirm = null; render(); return;
-    case "discard-yes": endSession(); render(); return;
-    case "save": saveSession(); return;
+    // install + home
+    case "skip-install": UI.skipInstall = true; saveUI(); render(); return;
+    case "start": startWorkout(); render(); window.scrollTo(0,0); return;
+    case "pick": openSheet("pick"); return;
+    case "pickw": S.chosen = d.k===nextWorkout() ? null : d.k; closeSheet(); render(); return;
+    case "guide": openSheet("guide"); return;
+    case "gtab": S.guideTab = d.t; renderSheet(); $("#sheet-root .sheet-in").scrollTop = 0; return;
+    // session
+    case "log": if(S.typing) commitTyping(); audio(); logSet(); return;
+    case "type": if(S.typing) commitTyping(); S.typing = d.k; render(); focusTyping(); return;
+    case "adj": if(S.typing) commitTyping(); adjust(d.k, parseFloat(d.d)); return;
+    case "goset": if(S.typing) commitTyping(); draft.cur = {ex:d.ex, i:+d.i}; draft.restEnd = null; cancelBeep(); saveDraft(); render(); return;
+    case "undo": undoLast(); return;
+    case "rest-add": if(draft.restEnd){ draft.restEnd += 30000; draft.restFor += 30; scheduleBeep((draft.restEnd-Date.now())/1000); saveDraft(); tick(); } return;
+    case "rest-skip": draft.restEnd = null; cancelBeep(); saveDraft(); render(); return;
+    case "overview": openSheet("overview"); return;
+    case "jump": { const W = PLAN[draft.workout], it = itemOf(W, d.ex), en = entry(it); const k = en.sets.findIndex(s=>!s.done); delete draft.skipped[it.id]; if(it.bonus) draft.bonus = true; draft.cur = {ex:it.id, i:k<0?0:k}; draft.restEnd = null; cancelBeep(); saveDraft(); closeSheet(); render(); return; }
+    case "howto": openSheet("howto"); return;
+    case "swap": openSheet("swap"); return;
+    case "setvariant": { const it = curItem(), en = entry(it); en.variant = d.name; en.sets.forEach(s=>{ if(!s.done){ s.w = null; s.r = null; } }); saveDraft(); closeSheet(); render(); return; }
+    case "skip-ex": { const it = curItem(); if(it){ draft.skipped[it.id] = true; draft.cur = nextCur(); saveDraft(); render(); toast("Skipped "+short(entry(it).variant), {label:"Undo", fn:()=>{ delete draft.skipped[it.id]; draft.cur = nextCur(); saveDraft(); render(); }}); } return; }
+    case "bonus": draft.bonus = true; draft.cur = nextCur(); saveDraft(); render(); return;
+    case "end": closeSheet(); openSheet("end"); return;
+    case "finish": closeSheet(); finishWorkout(); return;
+    case "discard": S.confirm = "discard"; renderSheet(); return;
+    case "discard-yes": closeSheet(); endSession(); render(); toast("Workout discarded"); return;
+    case "cancel-confirm": S.confirm = null; renderSheet(); return;
+    case "finish-done": S.finish = null; render(); window.scrollTo(0,0); return;
+    case "close": closeSheet(); return;
+    // protein
+    case "addfood": openSheet("addfood", {}); setTimeout(()=>{ const n = $("#af-name"); n && n.focus(); }, 50); return;
+    case "af-once": { const g = num($("#af-g").value); if(!(g>0)){ toast("Enter the grams of protein."); return; } addProtein(g, $("#af-name").value.trim() || "Custom"); closeSheet(); render(); return; }
     case "scan": openSheet("scan", {}); return;
+    case "showall": S.showAll = !S.showAll; render(); return;
+    case "plate": openSheet("plate", {picked:{}}); return;
+    case "editfood": S.confirm = null; openSheet("editfood", {id:d.id}); return;
+    case "ef-rmitem": { const f = DB.myFoods.find(x=>x.id===S.sheet.id); if(f && f.items){ f.items.splice(+d.k,1); f.g = r1(f.items.reduce((a,x)=>a+x.g,0)); persist(); renderSheet(); render(); } return; }
+    case "ef-del": S.confirm = "delfood"; renderSheet(); return;
+    case "ef-del-yes": DB.myFoods = DB.myFoods.filter(x=>x.id!==S.sheet.id); delete DB.usage["my:"+S.sheet.id]; persist(); closeSheet(); render(); toast("Deleted"); return;
+    case "todaylog": openSheet("todaylog"); return;
+    case "food-fix": syncFoodInputs(); S.sheet.fix = true; renderSheet(); return;
+    case "food-add": {
+      syncFoodInputs();
+      const sh = S.sheet, f = sh.food, g = foodGrams();
+      if(!(g>0)) return;
+      const label = (f.name || "Scanned item") + (f.pServing!=null ? (sh.servings!==1 ? " ×"+sh.servings : "") : (sh.grams ? " ("+sh.grams+" g)" : ""));
+      if(sh.missing || sh.fix) f.source = "you";
+      rememberFood(f);
+      addProtein(g, label, "scan:"+f.code);
+      closeSheet(); render(); return;
+    }
+    // history + settings
+    case "edit-save": {
+      const s = S.edit;
+      s.entries.forEach(en=>{ en.sets = en.sets.map(st=>({w:num(st.w)||0, r:parseInt(st.r,10)||0})).filter(st=>st.r>0); });
+      s.entries = s.entries.filter(en=>en.sets.length);
+      const i = DB.sessions.findIndex(x=>x.id===s.id);
+      if(i>=0) DB.sessions[i] = s;
+      persist(); closeSheet(); render(); toast("Workout updated"); return;
+    }
+    case "edit-del": S.confirm = "edit-del"; renderSheet(); return;
+    case "edit-del-yes": DB.sessions = DB.sessions.filter(x=>x.id!==S.edit.id); persist(); closeSheet(); render(); toast("Workout deleted"); return;
     case "export": exportBackup(); return;
     case "copy-backup": copyBackup(); return;
     case "test-sound": audio(); scheduleBeep(0.05); if(!DB.settings.sound) toast("The beep is turned off"); return;
   }
 });
-view.addEventListener("input", e=>{
-  const t = e.target;
-  if(t.dataset.w || t.dataset.r){
-    const id = t.dataset.w || t.dataset.r, i = +t.dataset.i;
-    const item = PLAN[currentKey()].items.find(x=>x.id===id);
-    const wasNew = !draft;
-    entryFor(item).sets[i][t.dataset.w ? "w" : "r"] = t.value.trim();
-    saveDraft();
-    if(wasNew){ $("#bar").hidden = false; document.body.classList.add("running"); tick(); S.dirty = true; }
+document.addEventListener("input", e=>{
+  const t = e.target, s = S.edit;
+  if(s && t.dataset.ew!=null){ s.entries[+t.dataset.ew].sets[+t.dataset.si].w = t.value; return; }
+  if(s && t.dataset.er!=null){ s.entries[+t.dataset.er].sets[+t.dataset.si].r = t.value; return; }
+  if(S.sheet && S.sheet.kind==="food"){
+    syncFoodInputs();
+    const b = $('#sheet-root [data-act="food-add"]'), g = foodGrams();
+    if(b){ b.disabled = !(g>0); b.textContent = g>0 ? "Add "+Math.round(g)+" g" : "Enter the protein to add it"; }
   }
 });
-view.addEventListener("change", e=>{
+document.addEventListener("change", e=>{
   const t = e.target;
-  if(t.dataset.swap){
-    const item = PLAN[currentKey()].items.find(x=>x.id===t.dataset.swap);
-    const en = entryFor(item); en.variant = t.value;
-    const w = prefillW(item, t.value);
-    en.sets.forEach(s=>{ if(!s.done) s.w = w; });
-    saveDraft(); render(); return;
+  if(t.dataset.pick && S.sheet && S.sheet.kind==="plate"){
+    S.sheet.picked[t.dataset.pick] = t.checked;
+    const total = foodRows().filter(r=>S.sheet.picked[r.key]).reduce((a,r)=>a+r.g,0);
+    const el = $("#pl-total"); if(el) el.innerHTML = 'Total: <b class="num">'+Math.round(total)+' g</b>';
+    return;
   }
   if(t.id==="set-bw"){ const v = num(t.value); DB.settings.bodyweight = v && v>=60 && v<=600 ? v : null; persist(); toast(DB.settings.bodyweight ? "Protein goal updated" : "Bodyweight cleared"); return; }
-  if(t.id==="set-sound"){ DB.settings.sound = t.checked; persist(); if(t.checked){ audio(); } return; }
+  if(t.id==="set-sound"){ DB.settings.sound = t.checked; persist(); if(t.checked) audio(); return; }
   if(t.id==="imp-file" && t.files && t.files[0]){
     const fr = new FileReader();
     fr.onload = ()=>{ importBackup(String(fr.result||"")); t.value = ""; };
     fr.readAsText(t.files[0]);
   }
 });
-view.addEventListener("focusout", ()=>{ setTimeout(()=>{ if(S.dirty) renderSafe(); }, 0); });
-view.addEventListener("submit", e=>{
+document.addEventListener("focusout", e=>{
+  if(e.target.id==="typing"){ setTimeout(()=>{ if(S.typing){ commitTyping(); render(); } }, 0); return; }
+});
+document.addEventListener("keydown", e=>{ if(e.target.id==="typing" && e.key==="Enter"){ e.preventDefault(); e.target.blur(); } });
+document.addEventListener("submit", e=>{
   e.preventDefault();
   const f = e.target;
   if(f.id==="ci-form"){
@@ -864,97 +1204,34 @@ view.addEventListener("submit", e=>{
   }
   if(f.id==="bw-form"){ const v = num($("#bw-in").value); if(v && v>=60 && v<=600){ DB.settings.bodyweight = v; persist(); render(); } else toast("Enter your weight in pounds."); }
   if(f.id==="paste-form"){ const v = $("#paste-in").value.trim(); if(v) importBackup(v); else toast("Paste the backup text first."); }
-  if(f.id==="custom-form"){ const v = num($("#custom-g").value); if(v && v>0 && v<400){ addProtein(v, "Custom"); render(); } else toast("Enter the grams of protein."); }
+  if(f.id==="code-form"){ const v = $("#code-in").value.replace(/\D/g,""); if(v){ parkCamera(); lookup(v); } }
+  if(f.id==="addfood-form"){
+    const name = $("#af-name").value.trim(), g = num($("#af-g").value), where = $("#af-where").value.trim();
+    if(!(g>0)){ toast("Enter the grams of protein."); return; }
+    const food = {id:"f"+Date.now().toString(36), name:name || "My food", g:r1(g), where};
+    DB.myFoods.push(food);
+    addProtein(food.g, food.name, "my:"+food.id);
+    closeSheet(); render();
+  }
+  if(f.id==="plate-form"){
+    const rows = foodRows().filter(r=>S.sheet.picked[r.key]);
+    if(!rows.length){ toast("Pick at least one food."); return; }
+    const name = $("#pl-name").value.trim() || "My plate";
+    const items = rows.map(r=>({name:r.name, g:r1(r.g)}));
+    DB.myFoods.push({id:"p"+Date.now().toString(36), name, g:r1(items.reduce((a,x)=>a+x.g,0)), items, where:""});
+    persist(); closeSheet(); render(); toast("Saved "+name+". Tap + to log it.");
+  }
+  if(f.id==="editfood-form"){
+    const food = DB.myFoods.find(x=>x.id===S.sheet.id); if(!food) return;
+    food.name = $("#ef-name").value.trim() || food.name;
+    if(!food.items){ const g = num($("#ef-g").value); if(g>0) food.g = r1(g); food.where = $("#ef-where").value.trim(); }
+    persist(); closeSheet(); render(); toast("Saved");
+  }
 });
 
-// sheet events
-const sroot = $("#sheet-root");
-sroot.addEventListener("click", e=>{
-  if(e.target.dataset && e.target.dataset.scrim){ closeSheet(); return; }
-  const t = e.target.closest("button"); if(!t) return;
-  const d = t.dataset;
-  if(d.edit){ openEdit(d.edit); return; }
-  if(d.step && S.sheet){ S.sheet.servings = Math.max(0.5, Math.min(20, S.sheet.servings + parseFloat(d.step))); syncFoodInputs(); renderSheet(); return; }
-  if(d.addset && S.edit){ const e2 = S.edit.entries[+d.addset], last = e2.sets[e2.sets.length-1]; e2.sets.push({w:last?last.w:0, r:last?last.r:0}); renderSheet(); return; }
-  if(d.rmset && S.edit){ const [ei,si] = d.rmset.split(":").map(Number); S.edit.entries[ei].sets.splice(si,1); if(!S.edit.entries[ei].sets.length) S.edit.entries.splice(ei,1); renderSheet(); return; }
-  if(d.rmex && S.edit){ S.edit.entries.splice(+d.rmex,1); renderSheet(); return; }
-  switch(d.act){
-    case "close": closeSheet(); return;
-    case "cancel-sheet": S.confirm = null; renderSheet(); return;
-    case "edit-save": {
-      const s = S.edit;
-      s.entries.forEach(en=>{ en.sets = en.sets.map(st=>({w:num(st.w)||0, r:parseInt(st.r,10)||0})).filter(st=>st.r>0); });
-      s.entries = s.entries.filter(en=>en.sets.length);
-      const i = DB.sessions.findIndex(x=>x.id===s.id);
-      if(i>=0) DB.sessions[i] = s;
-      persist(); closeSheet(); render(); toast("Workout updated"); return;
-    }
-    case "edit-del": S.confirm = "edit-del"; renderSheet(); return;
-    case "edit-del-yes": DB.sessions = DB.sessions.filter(x=>x.id!==S.edit.id); persist(); closeSheet(); render(); toast("Workout deleted"); return;
-    case "food-fix": syncFoodInputs(); S.sheet.fix = true; renderSheet(); return;
-    case "food-add": {
-      syncFoodInputs();
-      const sh = S.sheet, f = sh.food, g = foodGrams();
-      if(!(g>0)) return;
-      const label = (f.name || "Scanned item") + (f.pServing!=null ? " ×"+sh.servings : (sh.grams ? " ("+sh.grams+" g)" : ""));
-      if(sh.missing || sh.fix) f.source = "you";
-      rememberFood(f);
-      addProtein(g, label);
-      closeSheet(); render(); return;
-    }
-  }
-});
-sroot.addEventListener("input", e=>{
-  const t = e.target, s = S.edit;
-  if(s && t.dataset.ew!=null){ s.entries[+t.dataset.ew].sets[+t.dataset.si].w = t.value; return; }
-  if(s && t.dataset.er!=null){ s.entries[+t.dataset.er].sets[+t.dataset.si].r = t.value; return; }
-  if(S.sheet && S.sheet.kind==="food"){
-    syncFoodInputs();
-    const b = sroot.querySelector('[data-act="food-add"]'), g = foodGrams();
-    if(b){ b.disabled = !(g>0); b.textContent = g>0 ? "Add "+Math.round(g)+" g" : "Enter the protein to add it"; }
-  }
-});
-sroot.addEventListener("submit", e=>{
-  e.preventDefault();
-  if(e.target.id==="code-form"){ const v = $("#code-in").value.replace(/\D/g,""); if(v){ stopCamera(); lookup(v); } }
-});
-function syncFoodInputs(){
-  const sh = S.sheet; if(!sh || sh.kind!=="food") return;
-  const n = $("#food-name"), p = $("#food-p"), sl = $("#food-sl"), gr = $("#food-grams");
-  if(n) sh.food.name = n.value.trim();
-  if(p){ const v = num(p.value); sh.food.pServing = v && v>0 ? v : null; }
-  if(sl) sh.food.servingLabel = sl.value.trim();
-  if(gr) sh.grams = gr.value.trim();
-}
-function openEdit(id){
-  const s = DB.sessions.find(x=>x.id===id); if(!s) return;
-  S.edit = JSON.parse(JSON.stringify(s));
-  S.confirm = null;
-  openSheet("edit", {});
-}
-
 // =====================================================================
-// Save, backup, import
+// Backup and import
 // =====================================================================
-function saveSession(){
-  S.error = null;
-  if(!draft) return;
-  const W = PLAN[draft.workout], entries = [];
-  for(const item of W.items){
-    const en = draft.entries[item.id]; if(!en) continue;
-    const sets = en.sets.map(s=>({w:num(s.w)||0, r:parseInt(s.r,10)||0})).filter(s=>s.r>0);
-    if(sets.length) entries.push({ex:item.id, variant:en.variant, sets});
-  }
-  if(!entries.length){ S.error = "Type the reps for at least one set before saving."; render(); return; }
-  const at = Date.now();
-  const doc = {id:"s-"+at, at, workout:draft.workout, minutes:Math.max(1, Math.round((at-draft.startedAt)/60000)), entries};
-  DB.sessions.push(doc);
-  if(!persist()){ DB.sessions = DB.sessions.filter(x=>x!==doc); S.error = "Couldn't save on this phone. Your sets are still here."; render(); return; }
-  const done = draft.workout;
-  endSession();
-  toast("Saved. Next time: "+PLAN[ROT[(ROT.indexOf(done)+1)%ROT.length]].name);
-  window.scrollTo(0,0); render();
-}
 function backupText(){ return JSON.stringify(Object.assign({app:"rotation", exportedAt:Date.now()}, DB)); }
 async function exportBackup(){
   const name = "rotation-backup-"+dayKey(), data = backupText();
@@ -979,8 +1256,8 @@ async function copyBackup(){
 }
 // Merges a backup into what's on the phone. Also accepts the claude.ai page's export ({sessions, checkins}).
 function importBackup(text){
-  let d; try{ d = JSON.parse(text); }catch(e){ toast("That file isn't a Rotation backup."); return; }
-  if(!d || (!Array.isArray(d.sessions) && !Array.isArray(d.checkins))){ toast("That file isn't a Rotation backup."); return; }
+  let d; try{ d = JSON.parse(text); }catch(e){ toast("That isn't a Rotation backup."); return; }
+  if(!d || (!Array.isArray(d.sessions) && !Array.isArray(d.checkins))){ toast("That isn't a Rotation backup."); return; }
   let ns = 0, nc = 0;
   (d.sessions||[]).forEach(s=>{
     if(!s || !s.at || !Array.isArray(s.entries)) return;
@@ -1004,15 +1281,17 @@ function importBackup(text){
     });
   }
   (d.foods||[]).forEach(f=>{ if(f && f.code && !DB.foods.some(x=>x.code===f.code)) DB.foods.push(f); });
+  (d.myFoods||[]).forEach(f=>{ if(f && f.id && !DB.myFoods.some(x=>x.id===f.id)) DB.myFoods.push(f); });
+  if(d.usage && typeof d.usage==="object") Object.keys(d.usage).forEach(k=>{ if(!DB.usage[k]) DB.usage[k] = d.usage[k]; });
   if(d.settings && !DB.settings.bodyweight && d.settings.bodyweight) DB.settings.bodyweight = d.settings.bodyweight;
   persist(); render();
-  toast("Imported "+ns+" workout"+(ns===1?"":"s")+" and "+nc+" check-in"+(nc===1?"":"s"));
+  toast("Imported "+plural(ns,"workout")+" and "+plural(nc,"check-in"));
 }
 
 // =====================================================================
 // Boot
 // =====================================================================
-if(draft) startTicker();
+if(draft){ normalizeDraft(); startTicker(); }
 render();
 if("serviceWorker" in navigator){ window.addEventListener("load", ()=>{ navigator.serviceWorker.register("sw.js").catch(()=>{}); }); }
 })();

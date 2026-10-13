@@ -19,41 +19,23 @@
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<div class="wrap">
-  <header class="top">
-    <h1 id="title">Today</h1>
-    <p class="sub" id="subline">Four short workouts in a loop. Do the next one whenever you go.</p>
-  </header>
-  <main id="view" aria-live="polite"></main>
-</div>
+<div class="wrap"><main id="view" aria-live="polite"></main></div>
 
-<div class="bar" id="bar" hidden>
-  <div class="bar-in">
-    <div style="display:grid;gap:5px;min-width:0">
-      <div class="stackrow" id="stack" aria-hidden="true"></div>
-      <div class="clock" id="clock">0:00 of 40:00</div>
-    </div>
-    <button class="rest" id="rest" aria-label="Rest timer"><small>Rest</small>–</button>
-    <div class="msg" id="barmsg" hidden></div>
-  </div>
-</div>
+<button class="pill-bar" id="pill" hidden></button>
 
 <nav class="tabs" aria-label="Sections">
   <div class="in" role="tablist">
-    <button role="tab" data-tab="today" aria-selected="true">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 7v10M18 7v10M3 10v4M21 10v4M6 12h12"/></svg>Today</button>
+    <button role="tab" data-tab="train" aria-selected="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 7v10M18 7v10M3 10v4M21 10v4M6 12h12"/></svg>Train</button>
     <button role="tab" data-tab="protein" aria-selected="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 9h16l-1.5 10a2 2 0 0 1-2 1.7h-9a2 2 0 0 1-2-1.7z"/><path d="M8 9V6a4 4 0 0 1 8 0v3"/></svg>Protein</button>
     <button role="tab" data-tab="progress" aria-selected="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>Progress</button>
-    <button role="tab" data-tab="plan" aria-selected="false">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 9h6M9 13h6M9 17h3"/></svg>Plan</button>
-    <button role="tab" data-tab="why" aria-selected="false">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5v.01"/></svg>Why</button>
   </div>
 </nav>
 
 <div id="sheet-root"></div>
+
 <template id="plan-extra">
   <section class="panel">
     <h2>How much each muscle gets</h2>
@@ -144,6 +126,12 @@
     </ul>
   </section>
 
+  <section class="panel prose">
+    <div class="row"><h2>Why the app works this way</h2><span class="verdict yes">Supported</span></div>
+    <p><b>Tracking plus a goal plus feedback.</b> Across 122 studies, programs that paired self-tracking with goals and feedback on progress worked better than ones that didn't (effect size 0.42 vs 0.26).<sup><a class="cite" href="#src-michie"></a></sup> In 138 studies, checking progress toward a goal helped people reach it.<sup><a class="cite" href="#src-harkin"></a></sup> That's why the app shows your week count against 4 workouts and your new bests when you finish.</p>
+    <p><b>One tap to log, rest timer starts by itself.</b> This is how the main lifting apps work (Hevy, Strong and others): your last numbers are filled in and a set is one tap.</p>
+  </section>
+
   <section class="panel">
     <h2>Sources</h2>
     <p class="small muted">Each study's abstract or full text was read, except where marked. The numbers on this page come from these papers.</p>
@@ -182,6 +170,8 @@
       <li id="src-nedeltcheva">Nedeltcheva et al. 2010, <i>Annals of Internal Medicine</i>. Sleep during a diet. <a href="https://pubmed.ncbi.nlm.nih.gov/20921542/" target="_blank" rel="noopener">pubmed.ncbi.nlm.nih.gov/20921542</a></li>
       <li id="src-delpino">Delpino et al. 2022, <i>Nutrition</i>. Creatine and lean mass (35 trials). <a href="https://doi.org/10.1016/j.nut.2022.111791" target="_blank" rel="noopener">doi.org/10.1016/j.nut.2022.111791</a></li>
       <li id="src-kreider">Kreider et al. 2017, <i>JISSN</i> creatine position stand (industry-funded grant), and Lak et al. 2025, <i>JISSN</i> hair trial. <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC5469049/" target="_blank" rel="noopener">PMC5469049</a> · <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC12020143/" target="_blank" rel="noopener">PMC12020143</a></li>
+      <li id="src-michie">Michie et al. 2009, <i>Health Psychology</i>. Which techniques make activity and diet programs work (122 studies). <a href="https://pubmed.ncbi.nlm.nih.gov/19916637/" target="_blank" rel="noopener">pubmed.ncbi.nlm.nih.gov/19916637</a></li>
+      <li id="src-harkin">Harkin et al. 2016, <i>Psychological Bulletin</i>. Monitoring goal progress and reaching goals (138 studies). <a href="https://eprints.whiterose.ac.uk/id/eprint/91437/" target="_blank" rel="noopener">eprints.whiterose.ac.uk/id/eprint/91437</a></li>
     </ol>
   </section>
 </template>
