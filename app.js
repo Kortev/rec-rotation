@@ -704,7 +704,11 @@ function viewWater(){
     WATER_PRESETS.forEach(p=>{ h += '<button class="opt" data-act="water-goal" data-oz="'+p.oz+'"><span>'+esc(p.label)+'<br><span class="small muted">'+esc(p.note)+'</span></span><b class="num">'+p.oz+' oz</b></button>'; });
     h += '<form id="wgoal-form" class="row" style="flex-wrap:nowrap"><label class="field grow"><input id="wg-oz" class="inp" inputmode="decimal" placeholder="Or your own goal"><i>oz</i></label><button class="btn ghost sm" style="width:auto" type="submit">Set</button></form></div>';
   }
-  h += '<div class="waters"><button class="btn sm" data-act="water" data-oz="8">+8 oz<small>glass</small></button><button class="btn ghost sm" data-act="water" data-oz="16.9">+16.9<small>bottle</small></button><button class="btn ghost sm" data-act="water" data-oz="32">+32 oz<small>big bottle</small></button></div>';
+  const bottle = num(DB.settings.bottleOz) || 20;
+  h += '<div class="waters"><button class="btn sm" data-act="water" data-oz="'+bottle+'">+'+bottle+' oz<small>my bottle</small></button><button class="btn ghost sm" data-act="water" data-oz="8">+8 oz<small>glass</small></button><button class="btn ghost sm" data-act="water" data-oz="32">+32 oz<small>big bottle</small></button></div>';
+  h += S.editBottle
+    ? '<form id="bottle-form" class="row" style="flex-wrap:nowrap"><label class="field grow"><input id="bt-oz" class="inp" inputmode="decimal" value="'+bottle+'" aria-label="How much your bottle holds"><i>oz</i></label><button class="btn ghost sm" style="width:auto" type="submit">Save</button></form>'
+    : '<button class="link" style="justify-self:start;padding:0" data-act="bottle-edit">My bottle holds '+bottle+' oz · Change</button>';
   h += '<form id="water-form" class="row" style="flex-wrap:nowrap"><label class="field grow"><input id="w-oz" class="inp" inputmode="decimal" placeholder="Other amount"><i>oz</i></label><button class="btn ghost sm" style="width:auto" type="submit">Add</button></form>';
   if(list.length){
     h += '<div><p class="sec">Today</p>';
@@ -1510,6 +1514,7 @@ document.addEventListener("click", e=>{
     case "water": addWater(parseFloat(d.oz)); return;
     case "water-goal": DB.settings.waterGoal = parseFloat(d.oz); persist(); render(); return;
     case "water-goal-reset": DB.settings.waterGoal = null; persist(); render(); return;
+    case "bottle-edit": S.editBottle = true; render(); const bt = $("#bt-oz"); if(bt){ bt.focus(); bt.select(); } return;
     case "push-on": remindersOn(); return;
     case "push-off": remindersOff(); return;
     case "copy-push": navigator.clipboard.writeText(JSON.stringify(DB.settings.pushSub)).then(()=>toast("Copied. Paste it to Claude."), ()=>toast("Couldn't copy. Long-press to select it instead.")); return;
@@ -1617,6 +1622,7 @@ document.addEventListener("submit", e=>{
     addProtein(food.g, food.name, "my:"+food.id);
     closeSheet(); render();
   }
+  if(f.id==="bottle-form"){ const v = num($("#bt-oz").value); if(v && v>=4 && v<=128){ DB.settings.bottleOz = r1(v); S.editBottle = false; persist(); render(); toast("Bottle set to "+r1(v)+" oz"); } else toast("Enter how many ounces your bottle holds."); return; }
   if(f.id==="water-form"){ const v = num($("#w-oz").value); if(v && v>0 && v<200){ addWater(v); } else toast("Enter the ounces."); return; }
   if(f.id==="wgoal-form"){ const v = num($("#wg-oz").value); if(v && v>=16 && v<=300){ DB.settings.waterGoal = Math.round(v); persist(); render(); } else toast("Enter a goal in ounces, like 90."); return; }
   if(f.id==="lookup-form"){ const q = $("#lk-q").value; $("#lk-q").blur(); runLookup(q); return; }
