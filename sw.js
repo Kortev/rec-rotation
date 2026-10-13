@@ -1,7 +1,7 @@
 // Offline support. The app's own files are served from the cache and refreshed in the
 // background, so the app opens instantly with no signal and picks up updates on the next launch.
 // Bump VERSION whenever the list of app files changes.
-const VERSION = "rotation-v2";
+const VERSION = "rotation-v3";
 const RUNTIME = "rotation-runtime";
 const SHELL = [
   "./", "./index.html", "./styles.css", "./app.js", "./manifest.webmanifest",

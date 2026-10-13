@@ -493,6 +493,8 @@ function viewFinish(){
   if(!f.bests.length && !f.starts.length) h += '<p class="muted">Same numbers as last time. Holding steady on a rough day still counts. Beat one rep next time.</p>';
   if(f.heavier.length) h += '<div class="card"><small>Next time, go heavier on</small><b style="font-size:16px">'+esc(f.heavier.join(", "))+'</b><span class="muted small">You hit the top of the rep range on every set</span></div>';
   if(t) h += '<button class="nudge" data-tab="protein"><span>Protein today</span><b>'+total+' of '+t.min+' g ›</b></button>';
+  if(!DB.lastBackup || Date.now() - DB.lastBackup > 7*864e5)
+    h += '<div class="card"><small>Back up your log</small><b style="font-size:16px">Last backup: '+(DB.lastBackup ? fmtDate(DB.lastBackup) : "never")+'</b><span class="muted small">Tap Save backup, then Save to Files → iCloud Drive. It keeps your log safe if something happens to your phone.</span><button class="btn ghost sm" style="margin-top:8px" data-act="export">Save backup</button></div>';
   h += '<div class="card"><small>Next time</small><b style="font-size:16px">'+esc(PLAN[nextWorkout()].name)+'</b><span class="muted small">'+esc(PLAN[nextWorkout()].focus)+'</span></div>';
   h += '<button class="btn" data-act="finish-done">Done</button>';
   return h + '</section>';
@@ -511,20 +513,33 @@ function addProtein(g, label, key){
   const k = dayKey(), e = {t:Date.now(), g, label:String(label||"").slice(0,80)};
   (DB.protein[k] = DB.protein[k] || []).push(e);
   if(key){ const u = DB.usage[key] || {n:0, last:0}; u.n++; u.last = e.t; DB.usage[key] = u; }
+  // Edge foods remember which meal you had them at, so the Edge list can show this meal's usuals first.
+  const edgeOpen = S.sheet && S.sheet.kind==="edge";
+  let bumped = null;
+  if(key && key.startsWith("my:")){
+    const f = DB.myFoods.find(x=>"my:"+x.id===key);
+    if(isEdge(f)){ const m = edgeOpen ? S.sheet.meal : mealNow(); f.meals = f.meals || {}; f.meals[m] = (f.meals[m]||0)+1; bumped = {f, m}; }
+  }
+  if(edgeOpen){ S.sheet.added = (S.sheet.added||0) + g; refreshEdge(); }
   persist();
   toast("Added "+Math.round(g)+" g", {label:"Undo", fn:()=>{
     const list = DB.protein[k] || []; const ix = list.findIndex(x=>x.t===e.t);
     if(ix>=0) list.splice(ix,1);
     if(!list.length) delete DB.protein[k];
     if(key && DB.usage[key]) DB.usage[key].n = Math.max(0, DB.usage[key].n-1);
+    if(bumped) bumped.f.meals[bumped.m] = Math.max(0, bumped.f.meals[bumped.m]-1);
+    if(S.sheet && S.sheet.kind==="edge"){ S.sheet.added = Math.max(0, (S.sheet.added||0) - g); refreshEdge(); }
     persist(); render();
   }});
 }
+const isEdge = f => !!(f && f.where && /edge/i.test(f.where) && !(f.items && f.items.length));
+const MEALS = [["breakfast","Breakfast"],["lunch","Lunch"],["dinner","Dinner"]];
+function mealNow(){ const d = new Date(), m = d.getHours()*60 + d.getMinutes(); return m < 630 ? "breakfast" : m < 960 ? "lunch" : "dinner"; }
 // Everything you can tap to log: your own foods and plates, scanned products, and common foods.
 function foodRows(){
   const rows = [];
   DB.myFoods.forEach(f=>rows.push({key:"my:"+f.id, id:f.id, name:f.name, g:f.g, mine:true, plate:!!(f.items && f.items.length),
-    sub: f.items && f.items.length ? f.items.map(x=>x.name).join(", ")+" · "+plural(f.items.length,"item") : (f.where || "Your food")}));
+    sub: f.items && f.items.length ? f.items.map(x=>x.name).join(", ")+" · "+plural(f.items.length,"item") : [f.where || "Your food", f.portion].filter(Boolean).join(" · ")}));
   DB.foods.filter(f=>f.pServing!=null).forEach(f=>rows.push({key:"scan:"+f.code, code:f.code, name:f.name||"Scanned item", g:f.pServing, sub:(f.brand ? f.brand+" · " : "")+"scanned"}));
   FOODS.forEach(f=>rows.push({key:"common:"+f.name, name:f.name, g:f.g, sub:f.portion, common:true}));
   rows.forEach(r=>{ const u = DB.usage[r.key]; r.n = u ? u.n : 0; r.last = u ? u.last : 0; });
@@ -546,7 +561,7 @@ function viewProtein(){
   } else {
     h += '<form id="bw-form" class="row" style="flex-wrap:nowrap"><label class="field grow"><input id="bw-in" class="inp" inputmode="decimal" placeholder="Your bodyweight" aria-label="Your bodyweight in pounds"><i>lb</i></label><button class="btn sm" style="width:auto" type="submit">Set goal</button></form><p class="small muted">Your goal is 0.7–1 g of protein per pound of bodyweight.</p>';
   }
-  h += '<div class="addrow"><button class="btn sm" data-act="addfood">+ Add food</button><button class="btn ghost sm" data-act="scan">Scan</button></div>';
+  h += '<div class="addrow"><button class="btn sm" data-act="edge">The Edge</button><button class="btn ghost sm" data-act="lookup">Search</button><button class="btn ghost sm" data-act="scan">Scan</button></div>';
 
   const rows = foodRows();
   const yours = rows.filter(r=>r.mine || r.n>0).sort((a,b)=> (b.n-a.n) || (b.last-a.last) || ((b.mine?1:0)-(a.mine?1:0)));
@@ -640,11 +655,13 @@ function viewProgress(){
   h += '</div></details></div>';
 
   const lb = DB.lastBackup ? fmtDate(DB.lastBackup) : "never";
-  const stale = !DB.lastBackup || Date.now() - DB.lastBackup > 14*864e5;
+  const stale = !DB.lastBackup || Date.now() - DB.lastBackup > 7*864e5;
   h += '<div class="panel"><p class="sec">Settings and backup</p>'+
     '<label class="switch" for="set-bw"><span>Bodyweight for your protein goal</span><span class="field" style="max-width:120px"><input id="set-bw" class="inp" inputmode="decimal" value="'+esc(DB.settings.bodyweight||"")+'" placeholder="150"><i>lb</i></span></label>'+
     '<label class="switch" for="set-sound"><span>Beep when rest is over<br><span class="small muted">The silent switch has to be on ring</span></span><input type="checkbox" id="set-sound"'+(DB.settings.sound?" checked":"")+'></label>'+
     '<button class="btn ghost sm" style="width:auto;justify-self:start" data-act="test-sound">Test the beep</button>'+
+    '<label class="small muted" for="set-fdc">Your USDA food search key (optional). The shared key allows about 10 searches an hour; a free personal key allows 1,000. <a href="https://fdc.nal.usda.gov/api-key-signup" target="_blank" rel="noopener">Get one free</a>, then paste it here. It stays on this phone.</label>'+
+    '<input id="set-fdc" class="inp" autocomplete="off" autocapitalize="off" spellcheck="false" value="'+esc(DB.settings.fdcKey||"")+'" placeholder="Paste your key">'+
     '<p class="small muted">Your log is stored only on this phone. Export a backup every couple of weeks so a lost or reset phone doesn\'t take it with it.</p>'+
     (stale && (DB.sessions.length || DB.checkins.length) ? '<p class="note err">Last backup: '+lb+'.</p>' : '<p class="small muted">Last backup: '+lb+'.</p>')+
     '<div class="row"><button class="btn sm" style="width:auto" data-act="export">Export backup</button><label class="btn ghost sm" style="width:auto" for="imp-file">Import</label><input id="imp-file" type="file" hidden><button class="btn ghost sm" style="width:auto" data-act="copy-backup">Copy as text</button></div>'+
@@ -668,9 +685,10 @@ function renderSheet(){
   const root = $("#sheet-root"), sh = S.sheet;
   if(!sh){ root.innerHTML = ""; return; }
   const fn = {overview:sheetOverview, end:sheetEnd, howto:sheetHowto, swap:sheetSwap, pick:sheetPick, guide:sheetGuide,
-    addfood:sheetAddFood, plate:sheetPlate, editfood:sheetEditFood, todaylog:sheetTodayLog,
+    addfood:sheetAddFood, plate:sheetPlate, editfood:sheetEditFood, todaylog:sheetTodayLog, edge:sheetEdge,
+    lookup:sheetLookup, portion:sheetPortion,
     edit:sheetEdit, exhist:()=>sheetExHist(sh.variant), scan:sheetScan, food:sheetFood}[sh.kind];
-  const full = sh.kind==="scan" || sh.kind==="guide";
+  const full = ["scan","guide","edge","lookup"].includes(sh.kind);
   root.innerHTML = '<div class="sheet" data-scrim="1"><div class="sheet-in'+(full?" full":"")+'" role="dialog" aria-modal="true">'+fn()+'</div></div>';
   numberCites(root);
   if(sh.kind==="scan") attachCamera();
@@ -756,7 +774,171 @@ function sheetAddFood(){
     '<label class="small muted" for="af-where">Where it\'s from (optional)</label><input id="af-where" class="inp" placeholder="e.g. The Edge" value="'+esc(sh.where==null?"The Edge":sh.where)+'">'+
     '<button class="btn" type="submit">Save to your foods and add</button>'+
     '<button class="btn ghost" type="button" data-act="af-once">Just add it once</button>'+
-    '</form><p class="small muted">On the dining site, tap a dish to see its protein. Save it once here and it\'s one tap from then on. Scanning works for packaged food.</p>';
+    '</form><p class="small muted">For dining hall dishes, the Edge button is faster: search, and add new dishes right there. Scanning works for packaged food.</p>';
+}
+// The Edge: your saved Edge dishes, this meal's usuals first, with search and add-as-you-go.
+// (Auburn's menu feed is locked to their own site and their terms forbid copying it, so the list is built from what you log.)
+function edgeListHtml(){
+  const sh = S.sheet, q = (sh.q||"").trim().toLowerCase(), meal = sh.meal;
+  const label = MEALS.find(x=>x[0]===meal)[1].toLowerCase();
+  const all = DB.myFoods.filter(isEdge);
+  const had = f => (f.meals && f.meals[meal]) || 0;
+  let foods = q ? all.filter(f=>f.name.toLowerCase().includes(q)) : all.slice();
+  foods.sort((a,b)=> (had(b)-had(a)) || a.name.localeCompare(b.name));
+  const row = f => '<div class="food" style="grid-template-columns:48px 1fr auto auto"><span class="g">'+Math.round(f.g)+'</span><span>'+esc(f.name)+'<small>'+(had(f) ? "had at "+label+" "+plural(had(f),"time") : "The Edge")+'</small></span><span></span><button class="plus" data-log="my:'+esc(f.id)+'" aria-label="Add '+esc(f.name)+', '+Math.round(f.g)+' grams">+</button></div>';
+  let h = "";
+  const usual = foods.filter(f=>had(f)>0), rest = foods.filter(f=>!had(f));
+  if(!q && usual.length){
+    h += '<p class="sec">Your '+label+' usuals</p>' + usual.map(row).join("");
+    if(rest.length) h += '<p class="sec" style="margin-top:14px">Other Edge dishes</p>' + rest.map(row).join("");
+  } else h += foods.map(row).join("");
+  if(q && !all.some(f=>f.name.toLowerCase()===q)){
+    h += '<form id="edge-add-form" class="card" style="gap:8px;margin-top:10px"><small>Not in your list yet</small><b style="font-size:16px">Add "'+esc(sh.q.trim())+'"</b>'+
+      '<div class="row" style="flex-wrap:nowrap"><label class="field grow"><input id="ea-g" class="inp" inputmode="decimal" placeholder="Protein, from the dining site" aria-label="Protein in grams"><i>g</i></label><button class="btn sm" style="width:auto" type="submit">Add</button></div>'+
+      '<span class="small muted">On Auburn\'s dining site, tap the dish to see its protein. You only do this once per dish.</span></form>';
+  }
+  if(!all.length && !q) h += '<p class="muted">No Edge dishes yet. Type what you\'re eating above, like "turkey burger", and add its protein from Auburn\'s dining site. The Edge repeats its menu, so within a cycle or two most of what you eat will be here for one tap.</p>';
+  return h;
+}
+// ---------- food search (USDA FoodData Central: packaged foods, generic foods, and some restaurant chains) ----------
+const FDC = "https://api.nal.usda.gov/fdc/v1/";
+function fdcKey(){ return (DB.settings.fdcKey||"").trim() || "DEMO_KEY"; }
+const titleCase = s => String(s||"").toLowerCase().replace(/(^|[\s\-'(])([a-z])/g, (m,a,b)=>a+b.toUpperCase());
+const cap = s => { s = String(s||""); return s.charAt(0).toUpperCase()+s.slice(1); };
+function parseHit(f){
+  const pn = (f.foodNutrients||[]).find(n=>n.nutrientId===1003 || n.nutrientNumber==="203");
+  const p100 = pn && num(pn.value)!=null ? r1(num(pn.value)) : null;
+  let name = String(f.description||""), where = "", src = "USDA";
+  const chain = /^([A-Z0-9'&.\- ]{3,}),\s*(.+)$/.exec(name);
+  if(f.dataType==="Branded"){ name = titleCase(name); where = titleCase(f.brandName || f.brandOwner || ""); src = "package label"; }
+  else if(chain && chain[1]===chain[1].toUpperCase() && /[A-Z]/.test(chain[1])){ where = titleCase(chain[1]); name = cap(chain[2]); src = "USDA, restaurant data"; }
+  else { name = cap(name); if(/^fast foods?,/i.test(name)){ name = cap(name.replace(/^fast foods?,\s*/i,"")); where = "Fast food"; } src = f.dataType==="Survey (FNDDS)" ? "USDA, typical recipe" : "USDA"; }
+  const portions = [];
+  const unit = String(f.servingSizeUnit||"").toUpperCase();
+  if(num(f.servingSize) && ["GRM","G","MLT","ML"].includes(unit)) portions.push({label:f.householdServingFullText || "1 serving", grams:num(f.servingSize)});
+  (f.foodMeasures||[]).forEach(m=>{ const gw = num(m.gramWeight); if(gw && !portions.some(p=>p.grams===gw)) portions.push({label:m.disseminationText || "1 serving", grams:gw}); });
+  return {fdcId:f.fdcId, type:f.dataType, name, where, src, p100, portions};
+}
+async function fdcFetch(url){
+  const res = await fetch(url);
+  if(res.status===429) throw {code:"limit"};
+  if(res.status===403 || res.status===401) throw {code:"key"};
+  if(!res.ok) throw {code:"http", status:res.status};
+  return res.json();
+}
+async function fdcSearch(q){
+  const base = FDC+"foods/search?api_key="+encodeURIComponent(fdcKey())+"&pageSize=25&query="+encodeURIComponent(q);
+  let j;
+  try{ j = await fdcFetch(base+"&dataType="+encodeURIComponent("Branded,SR Legacy,Survey (FNDDS),Foundation")); }
+  catch(e){ if(e && e.code==="http" && e.status===400) j = await fdcFetch(base); else throw e; }
+  return (j.foods||[]).map(parseHit).filter(x=>x.p100!=null);
+}
+async function fdcPortions(id){
+  const j = await fdcFetch(FDC+"food/"+encodeURIComponent(id)+"?api_key="+encodeURIComponent(fdcKey()));
+  return (j.foodPortions||[]).map(p=>{
+    const unit = p.measureUnit && p.measureUnit.name && p.measureUnit.name!=="undetermined" ? p.measureUnit.name : "";
+    const mod = p.modifier && !/^\d+$/.test(p.modifier) ? p.modifier : "";   // FNDDS uses numeric codes here
+    const label = p.portionDescription && p.portionDescription!=="Quantity not specified" ? p.portionDescription : [p.amount, unit, mod].filter(Boolean).join(" ");
+    return {label: label || "1 serving", grams: num(p.gramWeight)};
+  }).filter(p=>p.grams);
+}
+function fdcError(e){
+  if(e && e.code==="limit") return "The free shared USDA limit is used up for this hour. Add your own free key in Progress → Settings (takes a minute) and it goes away.";
+  if(e && e.code==="key") return "USDA didn't accept your key. Check it in Progress → Settings, or clear it to use the shared one.";
+  return "Couldn't reach the USDA food database. Check your signal and try again.";
+}
+function lookupLocalHtml(q){
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  if(!words.length) return "";
+  const hits = foodRows().filter(r=>{ const t = (r.name+" "+r.sub).toLowerCase(); return words.every(w=>t.includes(w)); }).slice(0,6);
+  return hits.length ? '<p class="sec">Already in your app</p>'+hits.map(r=>foodRow(r)).join("") : "";
+}
+function sheetLookup(){
+  const sh = S.sheet;
+  let h = head("Search foods", "Done");
+  h += '<form id="lookup-form" class="row" style="flex-wrap:nowrap"><input id="lk-q" class="inp grow" type="search" enterkeyhint="search" autocomplete="off" placeholder="e.g. chick-fil-a sandwich" aria-label="Food to search for" value="'+esc(sh.q||"")+'"><button class="btn sm" style="width:auto" type="submit">Search</button></form>';
+  h += '<div id="lk-local">'+lookupLocalHtml(sh.q||"")+'</div>';
+  if(sh.status) h += '<p class="small muted" role="status">'+esc(sh.status)+'</p>';
+  if(sh.results){
+    if(!sh.results.length) h += '<p class="muted">No matches in the USDA database. Try fewer words, like "chicken sandwich", or add it yourself below.</p>';
+    else {
+      h += '<p class="sec">From USDA FoodData Central</p><div>';
+      sh.results.forEach((f,i)=>{ h += '<button class="food" style="grid-template-columns:1fr auto" data-act="lk-pick" data-i="'+i+'"><span>'+esc(f.name)+'<small>'+esc([f.where, f.src].filter(Boolean).join(" · "))+'</small></span><span class="small muted num" style="text-align:right">'+esc(f.p100)+' g<br>per 100 g</span></button>'; });
+      h += '</div>';
+    }
+  }
+  h += '<button class="link" data-act="lk-manual">Not finding it? Add it yourself</button>';
+  h += '<p class="tiny muted">Restaurant entries in USDA\'s database can be a few years old. The restaurant\'s own nutrition page is the most accurate.</p>';
+  return h;
+}
+function portionGrams(){
+  const sh = S.sheet; if(!sh || sh.kind!=="portion") return 0;
+  const f = sh.food;
+  if(sh.pi>=0 && sh.portions[sh.pi]) return f.p100 * sh.portions[sh.pi].grams/100 * sh.servings;
+  const g = num(sh.grams); return g ? f.p100*g/100 : 0;
+}
+function sheetPortion(){
+  const sh = S.sheet, f = sh.food;
+  let h = head(esc(f.name), "Back");
+  h += '<p class="muted">'+esc([f.where, f.src].filter(Boolean).join(" · "))+'</p><p><b class="num">'+esc(f.p100)+' g</b> protein per 100 g</p>';
+  if(sh.loading) h += '<p class="small muted">Loading serving sizes…</p>';
+  if(sh.portions.length){
+    h += '<p class="sec">How much did you have?</p><div style="display:grid;gap:8px">';
+    sh.portions.forEach((p,i)=>{ h += '<button class="opt'+(sh.pi===i?" on":"")+'" data-act="pt-pick" data-i="'+i+'"><span>'+esc(p.label)+' <span class="small muted">('+Math.round(p.grams)+' g)</span></span><b class="num">'+Math.round(f.p100*p.grams/100)+' g</b></button>'; });
+    h += '</div>';
+  }
+  h += '<label class="small muted" for="pt-grams">'+(sh.portions.length ? "Or type the grams you ate" : "How many grams did you eat?")+'</label><label class="field"><input id="pt-grams" class="inp" inputmode="decimal" placeholder="e.g. 170" value="'+esc(sh.grams||"")+'"><i>g</i></label>';
+  if(sh.pi>=0) h += '<p class="sec">Servings</p><div class="stepper"><button data-act="pt-step" data-d="-0.5" aria-label="Half a serving less">−</button><output>'+sh.servings+'</output><button data-act="pt-step" data-d="0.5" aria-label="Half a serving more">+</button></div>';
+  h += '<label class="switch" for="pt-save"><span>Save to your foods for one-tap next time</span><input type="checkbox" id="pt-save"'+(sh.save?" checked":"")+'></label>';
+  const g = portionGrams();
+  h += '<button class="btn" data-act="pt-add" id="pt-add"'+(g>0?"":" disabled")+'>'+(g>0 ? "Add "+Math.round(g)+" g" : "Pick a serving size")+'</button>';
+  return h;
+}
+async function runLookup(q){
+  q = (q||"").trim(); if(!q) return;
+  const sh = S.sheet; sh.q = q; sh.status = "Searching…"; sh.results = null; renderSheet();
+  try{ const res = await fdcSearch(q); if(S.sheet!==sh) return; sh.results = res; sh.status = ""; }
+  catch(e){ if(S.sheet!==sh) return; sh.status = fdcError(e); }
+  renderSheet();
+}
+async function pickLookup(i){
+  const prev = S.sheet, f = prev.results[i]; if(!f) return;
+  openSheet("portion", {food:f, portions:f.portions.slice(), pi:f.portions.length?0:-1, grams:"", servings:1, save:true, back:prev, loading:!f.portions.length && f.type!=="Branded"});
+  if(S.sheet.loading){
+    const sh = S.sheet;
+    try{ const ps = await fdcPortions(f.fdcId); if(S.sheet!==sh) return; sh.portions = ps; if(ps.length) sh.pi = 0; }
+    catch(e){ if(S.sheet!==sh) return; toast(fdcError(e)); }
+    sh.loading = false; renderSheet();
+  }
+}
+function addFromPortion(){
+  const sh = S.sheet, f = sh.food, g = portionGrams(); if(!(g>0)) return;
+  const p = sh.pi>=0 ? sh.portions[sh.pi] : null;
+  const label = f.name + (f.where ? " ("+f.where+")" : "");
+  if(sh.save){
+    const per = p ? f.p100*p.grams/100 : g;
+    const food = {id:"f"+Date.now().toString(36), name:f.name, g:r1(per), where:f.where || "USDA", portion: p ? p.label : Math.round(num(sh.grams))+" g"};
+    DB.myFoods.push(food);
+    addProtein(g, label, "my:"+food.id);
+  } else addProtein(g, label);
+  closeSheet(); render();
+}
+
+function refreshEdge(){
+  if(!S.sheet || S.sheet.kind!=="edge") return;
+  const l = $("#edge-list"); if(l) l.innerHTML = edgeListHtml();
+  const a = $("#edge-added"); if(a){ a.hidden = !S.sheet.added; a.innerHTML = 'Added this meal: <b class="num">'+Math.round(S.sheet.added||0)+' g</b>'; }
+}
+function sheetEdge(){
+  const sh = S.sheet;
+  let h = head("The Edge", "Done");
+  h += '<div class="seg" style="grid-template-columns:repeat(3,1fr)">'+MEALS.map(([k,l])=>'<button aria-pressed="'+(sh.meal===k)+'" data-act="edge-meal" data-m="'+k+'">'+l+'</button>').join("")+'</div>';
+  h += '<input id="edge-q" class="inp" type="search" placeholder="Search or add a dish" aria-label="Search your Edge dishes" autocomplete="off" value="'+esc(sh.q||"")+'">';
+  h += '<p class="small muted" id="edge-added"'+(sh.added ? '' : ' hidden')+'>Added this meal: <b class="num">'+Math.round(sh.added||0)+' g</b></p>';
+  h += '<div id="edge-list">'+edgeListHtml()+'</div>';
+  h += '<details><summary>Lots of new dishes? Enter the Meal Calculator total</summary><div style="display:grid;gap:10px;margin-top:10px"><p class="small muted">On Auburn\'s dining site, open The Edge, tap Add on each dish you ate, and read the protein total from its Meal Calculator.</p>'+
+    '<form id="edge-calc-form" class="row" style="flex-wrap:nowrap"><label class="field grow"><input id="ec-g" class="inp" inputmode="decimal" placeholder="Protein total" aria-label="Meal Calculator protein total"><i>g</i></label><button class="btn sm" style="width:auto" type="submit">Add</button></form></div></details>';
+  return h;
 }
 function sheetPlate(){
   const sh = S.sheet, rows = foodRows().filter(r=>!r.plate);
@@ -956,7 +1138,7 @@ async function lookupOFF(code){
 async function lookupUSDA(code){
   const c = String(code).replace(/^0+/,"");
   const q = [c, c.padStart(12,"0"), c.padStart(13,"0"), c.padStart(14,"0")].filter((v,i,a)=>a.indexOf(v)===i).join(" OR ");
-  const res = await fetch("https://api.nal.usda.gov/fdc/v1/foods/search?api_key=DEMO_KEY&dataType=Branded&pageSize=5&query="+encodeURIComponent(q));
+  const res = await fetch("https://api.nal.usda.gov/fdc/v1/foods/search?api_key="+encodeURIComponent(fdcKey())+"&dataType=Branded&pageSize=5&query="+encodeURIComponent(q));
   if(!res.ok){ if(res.status===429) return null; throw new Error("http "+res.status); }
   const j = await res.json().catch(()=>null);
   const hit = j && (j.foods||[]).find(f=>String(f.gtinUpc||"").replace(/^0+/,"")===c);
@@ -1123,9 +1305,17 @@ document.addEventListener("click", e=>{
     case "discard-yes": closeSheet(); endSession(); render(); toast("Workout discarded"); return;
     case "cancel-confirm": S.confirm = null; renderSheet(); return;
     case "finish-done": S.finish = null; render(); window.scrollTo(0,0); return;
-    case "close": closeSheet(); return;
+    case "close": if(S.sheet && S.sheet.kind==="portion" && S.sheet.back){ const b = S.sheet.back; closeSheet(); S.sheet = b; document.body.classList.add("locked"); renderSheet(); return; } closeSheet(); return;
     // protein
     case "addfood": openSheet("addfood", {}); setTimeout(()=>{ const n = $("#af-name"); n && n.focus(); }, 50); return;
+    case "edge": openSheet("edge", {meal:mealNow(), q:"", added:0}); return;
+    case "lookup": openSheet("lookup", {q:"", results:null, status:""}); setTimeout(()=>{ const n = $("#lk-q"); n && n.focus(); }, 50); return;
+    case "lk-pick": pickLookup(+d.i); return;
+    case "lk-manual": { const q = S.sheet && S.sheet.q; closeSheet(); openSheet("addfood", {name:q||"", where:""}); return; }
+    case "pt-pick": S.sheet.pi = +d.i; S.sheet.grams = ""; renderSheet(); return;
+    case "pt-step": S.sheet.servings = Math.max(0.5, Math.min(20, S.sheet.servings + parseFloat(d.d))); renderSheet(); return;
+    case "pt-add": addFromPortion(); return;
+    case "edge-meal": S.sheet.meal = d.m; renderSheet(); return;
     case "af-once": { const g = num($("#af-g").value); if(!(g>0)){ toast("Enter the grams of protein."); return; } addProtein(g, $("#af-name").value.trim() || "Custom"); closeSheet(); render(); return; }
     case "scan": openSheet("scan", {}); return;
     case "showall": S.showAll = !S.showAll; render(); return;
@@ -1164,6 +1354,14 @@ document.addEventListener("click", e=>{
 });
 document.addEventListener("input", e=>{
   const t = e.target, s = S.edit;
+  if(t.id==="edge-q" && S.sheet && S.sheet.kind==="edge"){ S.sheet.q = t.value; refreshEdge(); return; }
+  if(t.id==="lk-q" && S.sheet && S.sheet.kind==="lookup"){ S.sheet.q = t.value; const l = $("#lk-local"); if(l) l.innerHTML = lookupLocalHtml(t.value); return; }
+  if(t.id==="pt-grams" && S.sheet && S.sheet.kind==="portion"){
+    S.sheet.grams = t.value;
+    if(num(t.value)){ S.sheet.pi = -1; document.querySelectorAll('#sheet-root [data-act="pt-pick"]').forEach(b=>b.classList.remove("on")); }
+    const b = $("#pt-add"), g = portionGrams(); if(b){ b.disabled = !(g>0); b.textContent = g>0 ? "Add "+Math.round(g)+" g" : "Pick a serving size"; }
+    return;
+  }
   if(s && t.dataset.ew!=null){ s.entries[+t.dataset.ew].sets[+t.dataset.si].w = t.value; return; }
   if(s && t.dataset.er!=null){ s.entries[+t.dataset.er].sets[+t.dataset.si].r = t.value; return; }
   if(S.sheet && S.sheet.kind==="food"){
@@ -1182,6 +1380,8 @@ document.addEventListener("change", e=>{
   }
   if(t.id==="set-bw"){ const v = num(t.value); DB.settings.bodyweight = v && v>=60 && v<=600 ? v : null; persist(); toast(DB.settings.bodyweight ? "Protein goal updated" : "Bodyweight cleared"); return; }
   if(t.id==="set-sound"){ DB.settings.sound = t.checked; persist(); if(t.checked) audio(); return; }
+  if(t.id==="set-fdc"){ DB.settings.fdcKey = t.value.trim(); persist(); toast(DB.settings.fdcKey ? "USDA key saved" : "Using the shared USDA key"); return; }
+  if(t.id==="pt-save" && S.sheet){ S.sheet.save = t.checked; return; }
   if(t.id==="imp-file" && t.files && t.files[0]){
     const fr = new FileReader();
     fr.onload = ()=>{ importBackup(String(fr.result||"")); t.value = ""; };
@@ -1212,6 +1412,22 @@ document.addEventListener("submit", e=>{
     DB.myFoods.push(food);
     addProtein(food.g, food.name, "my:"+food.id);
     closeSheet(); render();
+  }
+  if(f.id==="lookup-form"){ const q = $("#lk-q").value; $("#lk-q").blur(); runLookup(q); return; }
+  if(f.id==="edge-add-form"){
+    const name = (S.sheet.q||"").trim(), g = num($("#ea-g").value);
+    if(!(g>0)){ toast("Enter the grams of protein."); return; }
+    const food = {id:"f"+Date.now().toString(36), name:name.charAt(0).toUpperCase()+name.slice(1), g:r1(g), where:"The Edge", meals:{}};
+    DB.myFoods.push(food);
+    S.sheet.q = "";
+    addProtein(food.g, food.name, "my:"+food.id);
+    renderSheet(); render(); return;
+  }
+  if(f.id==="edge-calc-form"){
+    const g = num($("#ec-g").value);
+    if(!(g>0)){ toast("Enter the protein total."); return; }
+    addProtein(g, "The Edge "+S.sheet.meal+" (Meal Calculator)");
+    $("#ec-g").value = ""; render(); return;
   }
   if(f.id==="plate-form"){
     const rows = foodRows().filter(r=>S.sheet.picked[r.key]);
