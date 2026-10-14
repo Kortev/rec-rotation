@@ -1069,12 +1069,38 @@ function fdcError(e){
 // ---------- restaurants, built into the app so they work offline with no limit ----------
 // restaurants.json: USDA SR Legacy "Fast Foods" and "Restaurant Foods" with serving sizes (public domain, 2018 data).
 // CHAIN_ITEMS: current items from the chain's own nutrition info, which USDA doesn't cover.
-const CHAIN_ITEMS = [];
+// Chick-fil-A: protein per serving from chick-fil-a.com/nutrition-allergens, checked against item pages, Oct 2026.
+const CFA = "Chick-fil-A nutrition guide, Oct 2026";
+const CHAIN_ITEMS = [
+  {w:"Chick-fil-A", n:"Chicken Sandwich", src:CFA, s:[["1 sandwich",29]]},
+  {w:"Chick-fil-A", n:"Spicy Chicken Sandwich", src:CFA, s:[["1 sandwich",28]]},
+  {w:"Chick-fil-A", n:"Deluxe Sandwich", src:CFA, s:[["with American cheese",32],["no cheese",29]]},
+  {w:"Chick-fil-A", n:"Spicy Deluxe Sandwich", src:CFA, s:[["with pepper jack",34]]},
+  {w:"Chick-fil-A", n:"Grilled Chicken Sandwich", src:CFA, s:[["1 sandwich",28]]},
+  {w:"Chick-fil-A", n:"Grilled Chicken Club", src:CFA, s:[["1 sandwich",37]]},
+  {w:"Chick-fil-A", n:"Nuggets", src:CFA, s:[["8 count",27],["12 count",40]]},
+  {w:"Chick-fil-A", n:"Grilled Nuggets", src:CFA, s:[["8 count",25],["12 count",38]]},
+  {w:"Chick-fil-A", n:"Chick-n-Strips", src:CFA, s:[["3 count",29],["4 count",39]]},
+  {w:"Chick-fil-A", n:"Cool Wrap", src:CFA, s:[["1 wrap",43]]},
+  {w:"Chick-fil-A", n:"Cobb Salad with Nuggets", src:CFA, s:[["1 salad",41]]},
+  {w:"Chick-fil-A", n:"Spicy Southwest Salad", src:CFA, s:[["1 salad",33]]},
+  {w:"Chick-fil-A", n:"Chicken Biscuit", src:CFA, s:[["1 biscuit",19]]},
+  {w:"Chick-fil-A", n:"Spicy Chicken Biscuit", src:CFA, s:[["1 biscuit",19]]},
+  {w:"Chick-fil-A", n:"Chick-n-Minis", src:CFA, s:[["4 count",20]]},
+  {w:"Chick-fil-A", n:"Egg White Grill", src:CFA, s:[["1 sandwich",27]]},
+  {w:"Chick-fil-A", n:"Hash Brown Scramble Bowl", src:CFA, s:[["with nuggets",29],["with grilled filet",30],["with spicy chicken",32],["with sausage",23],["with bacon",23],["no meat",17]]},
+  {w:"Chick-fil-A", n:"Hash Brown Scramble Burrito", src:CFA, s:[["with nuggets",34],["with grilled filet",35],["with spicy chicken",37]]},
+  {w:"Chick-fil-A", n:"Mac & Cheese", src:CFA, s:[["medium",20],["small",12]]},
+  {w:"Chick-fil-A", n:"Waffle Potato Fries", src:CFA, s:[["medium",5],["small",4],["large",7]]},
+  {w:"Chick-fil-A", n:"Chicken Noodle Soup", src:CFA, s:[["cup",11],["bowl",20]]},
+  {w:"Chick-fil-A", n:"Berry Parfait", src:CFA, s:[["1 parfait",13]]}
+];
 let REST = null, restLoading = null;
 function loadRestaurants(){
   if(REST) return Promise.resolve(REST);
   if(!restLoading) restLoading = fetch("restaurants.json").then(r=>r.json()).then(j=>{
-    const usda = j.items.map(it=>({where:it.w, name:it.n, src:"USDA, 2018 data", p100:it.p, portions:it.s.map(([label,grams])=>({label, grams}))}));
+    const usda = j.items.filter(it=>!CHAIN_ITEMS.some(c=>c.w===it.w && squash(c.n)===squash(it.n)))   // current menu replaces the 2018 entry
+      .map(it=>({where:it.w, name:it.n, src:"USDA, 2018 data", p100:it.p, portions:it.s.map(([label,grams])=>({label, grams}))}));
     const cur = CHAIN_ITEMS.map(it=>({where:it.w, name:it.n, src:it.src, p100:null, current:true, portions:it.s.map(([label,prot])=>({label, prot}))}));
     REST = cur.concat(usda); return REST;
   }).catch(()=>{ restLoading = null; return []; });
