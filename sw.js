@@ -1,12 +1,12 @@
 // Offline support. The app's own files are served from the cache and refreshed in the
 // background, so the app opens instantly with no signal and picks up updates on the next launch.
 // Bump VERSION whenever the list of app files changes.
-const VERSION = "rotation-v6";
+const VERSION = "rotation-v7";
 const RUNTIME = "rotation-runtime";
 const STATE = "rotation-state";   // small summary the app writes so reminders can say what's next
 const SHELL = [
   "./", "./index.html", "./styles.css", "./app.js", "./manifest.webmanifest",
-  "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png", "./icons/favicon-32.png"
+  "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png", "./icons/favicon-32.png", "./restaurants.json"
 ];
 
 self.addEventListener("install", e => {

@@ -1066,11 +1066,52 @@ function fdcError(e){
   if(e && e.code==="key") return "USDA didn't accept your key. Check it in Progress → Settings, or clear it to use the shared one.";
   return "Couldn't reach the USDA food database. Check your signal and try again.";
 }
+// ---------- restaurants, built into the app so they work offline with no limit ----------
+// restaurants.json: USDA SR Legacy "Fast Foods" and "Restaurant Foods" with serving sizes (public domain, 2018 data).
+// CHAIN_ITEMS: current items from the chain's own nutrition info, which USDA doesn't cover.
+const CHAIN_ITEMS = [];
+let REST = null, restLoading = null;
+function loadRestaurants(){
+  if(REST) return Promise.resolve(REST);
+  if(!restLoading) restLoading = fetch("restaurants.json").then(r=>r.json()).then(j=>{
+    const usda = j.items.map(it=>({where:it.w, name:it.n, src:"USDA, 2018 data", p100:it.p, portions:it.s.map(([label,grams])=>({label, grams}))}));
+    const cur = CHAIN_ITEMS.map(it=>({where:it.w, name:it.n, src:it.src, p100:null, current:true, portions:it.s.map(([label,prot])=>({label, prot}))}));
+    REST = cur.concat(usda); return REST;
+  }).catch(()=>{ restLoading = null; return []; });
+  return restLoading;
+}
+const squash = s => String(s).toLowerCase().replace(/[^a-z0-9]/g,"");
+function restaurantMatches(q){
+  if(!REST) return [];
+  const words = q.toLowerCase().split(/[\s,]+/).filter(Boolean);
+  if(!words.length) return [];
+  const out = [];
+  for(const it of REST){
+    const hay = (it.where+" "+it.name).toLowerCase(), hs = squash(hay), ws = squash(it.where);
+    let score = 0, ok = true;
+    for(const w of words){
+      const sw = squash(w); if(!sw) continue;
+      if(hay.includes(w) || hs.includes(sw)) score += ws.includes(sw) ? 2 : 1; else { ok = false; break; }
+    }
+    if(ok) out.push({it, score: score + (it.current ? 1.5 : 0) - it.name.length/200});
+  }
+  return out.sort((a,b)=>b.score-a.score).slice(0,10).map(x=>x.it);
+}
+const protOf = (f, p) => p.prot!=null ? p.prot : (f.p100!=null && p.grams ? f.p100*p.grams/100 : 0);
 function lookupLocalHtml(q){
   const words = q.toLowerCase().split(/\s+/).filter(Boolean);
   if(!words.length) return "";
-  const hits = foodRows().filter(r=>{ const t = (r.name+" "+r.sub).toLowerCase(); return words.every(w=>t.includes(w)); }).slice(0,6);
-  return hits.length ? '<p class="sec">Already in your app</p>'+hits.map(r=>foodRow(r)).join("") : "";
+  let h = "";
+  const hits = foodRows().filter(r=>{ const t = (r.name+" "+r.sub).toLowerCase(), ts = squash(t); return words.every(w=>t.includes(w) || ts.includes(squash(w))); }).slice(0,6);
+  if(hits.length) h += '<p class="sec">Already in your app</p>'+hits.map(r=>foodRow(r)).join("");
+  const rest = restaurantMatches(q);
+  if(S.sheet) S.sheet.rest = rest;
+  if(rest.length){
+    h += '<p class="sec" style="margin-top:10px">Restaurants</p><div>';
+    rest.forEach((it,i)=>{ const p = it.portions[0]; h += '<button class="food" style="grid-template-columns:1fr auto" data-act="rs-pick" data-i="'+i+'"><span>'+esc(it.name)+'<small>'+esc(it.where+" · "+(it.current ? "current menu" : "USDA, 2018"))+'</small></span><span class="small muted num" style="text-align:right">'+(p ? '<b style="color:var(--ink);font-size:16px">'+Math.round(protOf(it,p))+' g</b><br>'+esc(p.label) : esc(it.p100)+' g<br>per 100 g')+'</span></button>'; });
+    h += '</div>';
+  }
+  return h;
 }
 function sheetLookup(){
   const sh = S.sheet;
@@ -1087,26 +1128,32 @@ function sheetLookup(){
     }
   }
   h += '<button class="link" data-act="lk-manual">Not finding it? Add it yourself</button>';
-  h += '<p class="tiny muted">Restaurant entries in USDA\'s database can be a few years old. The restaurant\'s own nutrition page is the most accurate.</p>';
+  h += '<p class="tiny muted">Restaurant items marked "USDA, 2018" are from USDA\'s last restaurant survey, so recipes may have changed. The restaurant\'s own nutrition page is the most accurate.</p>';
   return h;
 }
 function portionGrams(){
   const sh = S.sheet; if(!sh || sh.kind!=="portion") return 0;
   const f = sh.food;
-  if(sh.pi>=0 && sh.portions[sh.pi]) return f.p100 * sh.portions[sh.pi].grams/100 * sh.servings;
-  const g = num(sh.grams); return g ? f.p100*g/100 : 0;
+  if(sh.pi>=0 && sh.portions[sh.pi]) return protOf(f, sh.portions[sh.pi]) * sh.servings;
+  const pr = num(sh.prot); if(pr) return pr;
+  const g = num(sh.grams); return g && f.p100!=null ? f.p100*g/100 : 0;
 }
 function sheetPortion(){
   const sh = S.sheet, f = sh.food;
   let h = head(esc(f.name), "Back");
-  h += '<p class="muted">'+esc([f.where, f.src].filter(Boolean).join(" · "))+'</p><p><b class="num">'+esc(f.p100)+' g</b> protein per 100 g</p>';
+  h += '<p class="muted">'+esc([f.where, f.src].filter(Boolean).join(" · "))+'</p>'+(f.p100!=null ? '<p class="small muted"><b class="num">'+esc(f.p100)+' g</b> protein per 100 g</p>' : '');
   if(sh.loading) h += '<p class="small muted">Loading serving sizes…</p>';
   if(sh.portions.length){
     h += '<p class="sec">How much did you have?</p><div style="display:grid;gap:8px">';
-    sh.portions.forEach((p,i)=>{ h += '<button class="opt'+(sh.pi===i?" on":"")+'" data-act="pt-pick" data-i="'+i+'"><span>'+esc(p.label)+' <span class="small muted">('+Math.round(p.grams)+' g)</span></span><b class="num">'+Math.round(f.p100*p.grams/100)+' g</b></button>'; });
+    sh.portions.forEach((p,i)=>{ h += '<button class="opt'+(sh.pi===i?" on":"")+'" data-act="pt-pick" data-i="'+i+'"><span>'+esc(p.label)+(p.grams ? ' <span class="small muted">('+Math.round(p.grams)+' g)</span>' : '')+'</span><b class="num">'+Math.round(protOf(f,p))+' g</b></button>'; });
     h += '</div>';
+  } else if(!sh.loading){
+    h += '<p class="small muted">USDA doesn\'t list a serving size for this one. If you know the protein from the menu or label, enter it below. Otherwise enter roughly how many grams you ate.</p>';
   }
-  h += '<label class="small muted" for="pt-grams">'+(sh.portions.length ? "Or type the grams you ate" : "How many grams did you eat?")+'</label><label class="field"><input id="pt-grams" class="inp" inputmode="decimal" placeholder="e.g. 170" value="'+esc(sh.grams||"")+'"><i>g</i></label>';
+  if(!sh.portions.length || sh.other){
+    h += '<label class="small muted" for="pt-prot">Protein from the menu or label</label><label class="field"><input id="pt-prot" class="inp" inputmode="decimal" placeholder="e.g. 28" value="'+esc(sh.prot||"")+'"><i>g</i></label>';
+    if(f.p100!=null) h += '<label class="small muted" for="pt-grams">Or grams you ate</label><label class="field"><input id="pt-grams" class="inp" inputmode="decimal" placeholder="e.g. 170" value="'+esc(sh.grams||"")+'"><i>g</i></label>';
+  } else h += '<button class="link" style="justify-self:start;padding:0" data-act="pt-other">Different amount? Enter it yourself</button>';
   if(sh.pi>=0) h += '<p class="sec">Servings</p><div class="stepper"><button data-act="pt-step" data-d="-0.5" aria-label="Half a serving less">−</button><output>'+sh.servings+'</output><button data-act="pt-step" data-d="0.5" aria-label="Half a serving more">+</button></div>';
   h += '<label class="switch" for="pt-save"><span>Save to your foods for one-tap next time</span><input type="checkbox" id="pt-save"'+(sh.save?" checked":"")+'></label>';
   const g = portionGrams();
@@ -1135,8 +1182,8 @@ function addFromPortion(){
   const p = sh.pi>=0 ? sh.portions[sh.pi] : null;
   const label = f.name + (f.where ? " ("+f.where+")" : "");
   if(sh.save){
-    const per = p ? f.p100*p.grams/100 : g;
-    const food = {id:"f"+Date.now().toString(36), name:f.name, g:r1(per), where:f.where || "USDA", portion: p ? p.label : Math.round(num(sh.grams))+" g"};
+    const per = p ? protOf(f, p) : g;
+    const food = {id:"f"+Date.now().toString(36), name:f.name, g:r1(per), where:f.where || "USDA", portion: p ? p.label : (num(sh.prot) ? "1 serving" : Math.round(num(sh.grams))+" g")};
     DB.myFoods.push(food);
     addProtein(g, label, "my:"+food.id);
   } else addProtein(g, label);
@@ -1542,8 +1589,12 @@ document.addEventListener("click", e=>{
     case "push-on": remindersOn(); return;
     case "push-off": remindersOff(); return;
     case "copy-push": navigator.clipboard.writeText(JSON.stringify(DB.settings.pushSub)).then(()=>toast("Copied. Paste it to Claude."), ()=>toast("Couldn't copy. Long-press to select it instead.")); return;
-    case "lookup": openSheet("lookup", {q:"", results:null, status:""}); setTimeout(()=>{ const n = $("#lk-q"); n && n.focus(); }, 50); return;
+    case "lookup": openSheet("lookup", {q:"", results:null, status:""}); setTimeout(()=>{ const n = $("#lk-q"); n && n.focus(); }, 50);
+      loadRestaurants().then(()=>{ if(S.sheet && S.sheet.kind==="lookup"){ const l = $("#lk-local"); if(l) l.innerHTML = lookupLocalHtml(S.sheet.q||""); } }); return;
     case "lk-pick": pickLookup(+d.i); return;
+    case "rs-pick": { const prev = S.sheet, it = prev.rest && prev.rest[+d.i]; if(!it) return;
+      openSheet("portion", {food:it, portions:it.portions.slice(), pi:it.portions.length?0:-1, grams:"", prot:"", servings:1, save:true, back:prev}); return; }
+    case "pt-other": S.sheet.other = true; S.sheet.pi = -1; renderSheet(); const po = $("#pt-prot"); if(po) po.focus(); return;
     case "lk-manual": { const q = S.sheet && S.sheet.q; closeSheet(); openSheet("addfood", {name:q||"", where:""}); return; }
     case "pt-pick": S.sheet.pi = +d.i; S.sheet.grams = ""; renderSheet(); return;
     case "pt-step": S.sheet.servings = Math.max(0.5, Math.min(20, S.sheet.servings + parseFloat(d.d))); renderSheet(); return;
@@ -1589,8 +1640,9 @@ document.addEventListener("input", e=>{
   const t = e.target, s = S.edit;
   if(t.id==="edge-q" && S.sheet && S.sheet.kind==="edge"){ S.sheet.q = t.value; refreshEdge(); return; }
   if(t.id==="lk-q" && S.sheet && S.sheet.kind==="lookup"){ S.sheet.q = t.value; const l = $("#lk-local"); if(l) l.innerHTML = lookupLocalHtml(t.value); return; }
-  if(t.id==="pt-grams" && S.sheet && S.sheet.kind==="portion"){
-    S.sheet.grams = t.value;
+  if((t.id==="pt-grams" || t.id==="pt-prot") && S.sheet && S.sheet.kind==="portion"){
+    if(t.id==="pt-grams"){ S.sheet.grams = t.value; if(num(t.value)){ S.sheet.prot = ""; const o = $("#pt-prot"); if(o) o.value = ""; } }
+    else { S.sheet.prot = t.value; if(num(t.value)){ S.sheet.grams = ""; const o = $("#pt-grams"); if(o) o.value = ""; } }
     if(num(t.value)){ S.sheet.pi = -1; document.querySelectorAll('#sheet-root [data-act="pt-pick"]').forEach(b=>b.classList.remove("on")); }
     const b = $("#pt-add"), g = portionGrams(); if(b){ b.disabled = !(g>0); b.textContent = g>0 ? "Add "+Math.round(g)+" g" : "Pick a serving size"; }
     return;
